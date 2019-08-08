@@ -5,11 +5,8 @@ use crate::{
     fee::LinearFee,
     fragment::config::ConfigParams,
     leadership::bft::LeaderId,
-    testing::arbitrary::utils as arbitrary_utils,
-    update::{
-        SignedUpdateProposal, SignedUpdateVote, UpdateProposal, UpdateProposalWithProposer,
-        UpdateVote,
-    },
+    testing::{arbitrary::utils as arbitrary_utils, builders::proposal_builder},
+    update::{SignedUpdateProposal, SignedUpdateVote},
 };
 use chain_crypto::{Ed25519, Ed25519Extended, SecretKey};
 use quickcheck::{Arbitrary, Gen};
@@ -66,7 +63,6 @@ impl Arbitrary for UpdateProposalData {
         let proposer_key = leaders.get(&proposer_id).unwrap();
 
         //create proposal
-        let mut update_proposal = UpdateProposal::new();
         let unique_arbitrary_settings: Vec<ConfigParam> = vec![
             ConfigParam::SlotsPerEpoch(u32::arbitrary(gen)),
             ConfigParam::SlotDuration(u8::arbitrary(gen)),
@@ -77,24 +73,11 @@ impl Arbitrary for UpdateProposalData {
             ConfigParam::ProposalExpiration(u32::arbitrary(gen)),
         ];
 
-        for config_param in
-            arbitrary_utils::choose_random_vec_subset(&unique_arbitrary_settings, gen)
-        {
-            update_proposal.changes.push(config_param);
-        }
-
-        //add proposer
-        let proposal_signature = update_proposal.make_certificate(proposer_key);
-        let update_proposal_with_proposer = UpdateProposalWithProposer {
-            proposal: update_proposal,
-            proposer_id: proposer_id.clone(),
-        };
-
-        //sign proposal
-        let signed_update_proposal = SignedUpdateProposal {
-            proposal: update_proposal_with_proposer,
-            signature: proposal_signature,
-        };
+        let signed_update_proposal = proposal_builder::build_proposal(
+            proposer_id,
+            proposer_key.clone(),
+            unique_arbitrary_settings,
+        );
 
         //generate proposal header
         let proposal_id = Hash::arbitrary(gen);
@@ -103,15 +86,7 @@ impl Arbitrary for UpdateProposalData {
         let signed_votes: Vec<SignedUpdateVote> = voters
             .iter()
             .map(|(id, key)| {
-                let update_vote = UpdateVote {
-                    proposal_id: proposal_id.clone(),
-                    voter_id: id.clone(),
-                };
-                let vote_signature = update_vote.make_certificate(&key.clone());
-                SignedUpdateVote {
-                    vote: update_vote,
-                    signature: vote_signature,
-                }
+                proposal_builder::build_vote(proposal_id, id.clone(), key.clone())
             })
             .collect();
 
