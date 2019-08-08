@@ -1,18 +1,14 @@
-use crate::block::ConsensusVersion;
-use crate::block::HeaderHash;
-use crate::config::ConfigParam;
-use crate::fragment::config::ConfigParams;
-use crate::fragment::Fragment;
-use crate::leadership::bft::LeaderId;
-use crate::ledger::Error;
-use crate::ledger::Ledger;
-use crate::milli::Milli;
-use crate::transaction::*;
+use crate::{
+    block::{ConsensusVersion, HeaderHash},
+    config::ConfigParam,
+    fragment::{config::ConfigParams, Fragment},
+    leadership::bft::LeaderId,
+    ledger::{Error, Ledger},
+    milli::Milli,
+};
 use chain_addr::{Address, Discrimination};
 use chain_crypto::*;
 use std::vec::Vec;
-
-use crate::testing::tx_builder::TransactionBuilder;
 
 pub struct ConfigBuilder {
     slot_duration: u8,
@@ -105,16 +101,4 @@ pub fn create_initial_fake_ledger(
         Ok(ledger) => Ok((block0_hash, ledger)),
         Err(error) => Err(error),
     }
-}
-
-pub fn create_initial_transaction(output: Output<Address>) -> Fragment {
-    let mut builder = TransactionBuilder::new();
-    let authenticator = builder.with_output(output).authenticate();
-    authenticator.as_message()
-}
-
-pub fn create_initial_transactions(outputs: &Vec<Output<Address>>) -> Fragment {
-    let mut builder = TransactionBuilder::new();
-    let authenticator = builder.with_outputs(outputs.to_vec()).authenticate();
-    authenticator.as_message()
 }

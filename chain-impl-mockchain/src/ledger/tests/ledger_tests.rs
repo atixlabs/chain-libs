@@ -13,6 +13,7 @@ use crate::{
             AccountStatesVerifier, ArbitraryValidTransactionData, NonZeroValue, UtxoVerifier,
         },
         ledger::{self, ConfigBuilder},
+        requests,
         tx_builder::TransactionBuilder,
     },
     transaction::*,
@@ -51,7 +52,7 @@ pub fn ledger_accepts_correct_transaction(
     receiver: AddressData,
     value: NonZeroValue,
 ) -> TestResult {
-    let message = ledger::create_initial_transaction(Output::from_address(
+    let message = requests::create_initial_transaction(Output::from_address(
         faucet.address.clone(),
         value.into(),
     ));
@@ -97,7 +98,7 @@ pub fn total_funds_are_total_in_ledger(
     mut transaction_data: ArbitraryValidTransactionData,
 ) -> TestResult {
     let message =
-        ledger::create_initial_transactions(&transaction_data.make_outputs_from_all_addresses());
+        requests::create_initial_transactions(&transaction_data.make_outputs_from_all_addresses());
     let (block0_hash, ledger) = ledger::create_initial_fake_ledger(
         &[message],
         ConfigBuilder::new()
@@ -159,7 +160,7 @@ pub fn utxo_no_enough_signatures() {
     let faucet = AddressData::utxo(Discrimination::Test);
     let receiver = AddressData::utxo(Discrimination::Test);
 
-    let message = ledger::create_initial_transaction(Output::from_address(
+    let message = requests::create_initial_transaction(Output::from_address(
         faucet.address.clone(),
         Value(42000),
     ));
@@ -192,7 +193,7 @@ pub fn transaction_with_more_than_253_outputs() {
         outputs.push(Output::from_address(receiver.address.clone(), Value(1)));
     }
 
-    let message = ledger::create_initial_transaction(Output::from_address(
+    let message = requests::create_initial_transaction(Output::from_address(
         faucet.address.clone(),
         Value(256),
     ));
@@ -224,7 +225,7 @@ pub fn transaction_with_more_than_253_outputs() {
 pub fn iterate() {
     let faucet = AddressData::utxo(Discrimination::Test);
 
-    let message = ledger::create_initial_transaction(Output::from_address(
+    let message = requests::create_initial_transaction(Output::from_address(
         faucet.address.clone(),
         Value(42000),
     ));
