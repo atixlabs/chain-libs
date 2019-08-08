@@ -476,7 +476,7 @@ mod test {
     use chain_core::property::ChainLength;
 
     #[quickcheck]
-    pub fn ledger_adopt_settiings_from_update_proposal(
+    pub fn ledger_adopt_settings_from_update_proposal(
         update_proposal_data: UpdateProposalData,
     ) -> TestResult {
         let config = mock_ledger::ConfigBuilder::new()
