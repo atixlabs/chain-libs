@@ -54,7 +54,6 @@ impl AddressData {
         }
     }
 
-
     pub fn from_discrimination_and_kind_type(
         discrimination: Discrimination,
         kind: &KindType,
@@ -119,6 +118,14 @@ impl AddressData {
             Kind::Group(key, _) => key,
             Kind::Single(key) => key,
             Kind::Multisig(_) => panic!("not yet implemented"),
+        }
+    }
+
+    pub fn delegation_key(&self) -> PublicKey<Ed25519> {
+        match self.kind() {
+            Kind::Group(_, delegation_key) => delegation_key,
+            Kind::Account(public_key) => public_key,
+            _ => panic!("wrong kind of address to to get delegation key"),
         }
     }
 
