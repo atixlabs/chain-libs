@@ -3,7 +3,6 @@
 use crate::{
     fragment::Fragment,
     ledger::{
-        Entry,
         Error::{NotEnoughSignatures, TransactionHasTooManyOutputs},
         Ledger,
     },
@@ -215,97 +214,5 @@ pub fn transaction_with_more_than_253_outputs() {
             actual: 255
         },
         ledger.apply_transaction(&fragment_id, &signed_tx, &fees)
-    )
-}
-
-#[test]
-pub fn iterate() {
-    let faucet = AddressData::utxo(Discrimination::Test);
-
-    let message = ledger::create_initial_transaction(Output::from_address(
-        faucet.address.clone(),
-        Value(42000),
-    ));
-    let (_block0_hash, ledger) =
-        ledger::create_initial_fake_ledger(&[message], ConfigBuilder::new().build()).unwrap();
-
-    // FIXME: generate arbitrary ledger
-
-    for item in ledger.iter() {
-        match item {
-            Entry::Globals(globals) => {
-                println!(
-                    "Globals date={} length={} block0_hash={} start_time={:?} discr={} kes_update_speed={}",
-                    globals.date,
-                    globals.chain_length,
-                    globals.static_params.block0_initial_hash,
-                    globals.static_params.block0_start_time,
-                    globals.static_params.discrimination,
-                    globals.static_params.kes_update_speed,
-                );
-            }
-            Entry::Utxo(entry) => {
-                println!(
-                    "Utxo {} {} {}",
-                    entry.fragment_id, entry.output_index, entry.output
-                );
-            }
-            Entry::OldUtxo(entry) => {
-                println!(
-                    "OldUtxo {} {} {}",
-                    entry.fragment_id, entry.output_index, entry.output
-                );
-            }
-            Entry::Account((id, state)) => {
-                println!(
-                    "Account {} {} {:?} {}",
-                    id,
-                    u32::from(state.counter),
-                    state.delegation,
-                    state.value,
-                );
-            }
-            Entry::ConfigParam(param) => {
-                println!(
-                    "ConfigParam {:?} {:?}",
-                    crate::config::Tag::from(&param),
-                    param,
-                );
-            }
-            Entry::UpdateProposal((id, state)) => {
-                println!(
-                    "UpdateProposal {} {:?} {} {:?}",
-                    id, state.proposal, state.proposal_date, state.votes
-                );
-            }
-            Entry::MultisigAccount((id, state)) => {
-                println!(
-                    "MultisigAccount {} {} {:?} {}",
-                    id,
-                    u32::from(state.counter),
-                    state.delegation,
-                    state.value,
-                );
-            }
-            Entry::MultisigDeclaration((id, decl)) => {
-                println!(
-                    "MultisigDeclaration {} {} {}",
-                    id,
-                    decl.threshold(),
-                    decl.total(),
-                );
-            }
-            Entry::StakePool((id, info)) => {
-                println!(
-                    "StakePool {} {} {:?} {:?}",
-                    id, info.serial, info.owners, info.keys,
-                );
-            }
-        }
-    }
-
-    let ledger2: Result<Ledger, _> = ledger.iter().collect();
-    let ledger2 = ledger2.unwrap();
-
-    assert!(ledger == ledger2);
+    );
 }
