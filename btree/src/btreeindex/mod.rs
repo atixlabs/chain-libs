@@ -10,7 +10,7 @@ use version::*;
 use crate::mem_page::MemPage;
 use crate::BTreeStoreError;
 use metadata::{Metadata, StaticSettings};
-use node::{InternalInsertStatus, LeafInsertStatus, Node};
+use node::{marker, InternalInsertStatus, LeafInsertStatus, Node};
 use pages::*;
 use std::borrow::Borrow;
 
@@ -58,7 +58,8 @@ where
         key_buffer_size: u32,
     ) -> Result<BTree<K>, BTreeStoreError> {
         let mut root_page = MemPage::new(page_size.try_into().unwrap());
-        Node::<K, &mut [u8]>::new_leaf(key_buffer_size.try_into().unwrap(), root_page.as_mut());
+        let root_node =
+            Node::<K, MemPage, marker::Leaf>::new(key_buffer_size.try_into().unwrap(), root_page);
 
         let mut metadata = Metadata::new();
 
@@ -72,13 +73,12 @@ where
 
         let first_page_id = metadata.page_manager.new_id();
 
-        pages
-            .write_page(Page {
-                page_id: first_page_id,
-                key_buffer_size,
-                mem_page: root_page,
-            })
-            .expect("Couldn't write first page");
+        pages.write_page::<marker::Leaf>(Page {
+            page_id: first_page_id,
+            key_buffer_size,
+            mem_page: root_node.to_page(),
+            marker: PhantomData,
+        })?;
 
         metadata.set_root(first_page_id);
 
@@ -203,7 +203,8 @@ where
 
         let needs_recurse = {
             let leaf = backtrack.get_next().unwrap();
-            self.insert_in_leaf(leaf, key, value)?
+            let mut leaf = leaf.downcast();
+            self.insert_in_leaf(&mut leaf, key, value)?
                 .map(|(split_key, new_node)| (leaf.id(), split_key, new_node))
         };
 
@@ -224,22 +225,20 @@ where
 
     pub(crate) fn insert_in_leaf<'a>(
         &self,
-        leaf: &mut Page,
+        leaf: &mut Page<marker::Leaf>,
         key: K,
         value: Value,
-    ) -> Result<Option<(K, Node<K, MemPage>)>, BTreeStoreError> {
+    ) -> Result<Option<(K, Node<K, MemPage, marker::Leaf>)>, BTreeStoreError> {
         let update = {
             let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
             let page_size = usize::try_from(self.static_settings.page_size).unwrap();
             let mut allocate = || {
                 let uninit = MemPage::new(page_size);
-                Node::<K, MemPage>::new_leaf(key_size, uninit)
+                Node::<K, MemPage, marker::Leaf>::new(key_size, uninit)
             };
 
-            let insert_status = leaf.as_node_mut(move |mut node: Node<K, &mut [u8]>| {
-                node.as_leaf_mut()
-                    .unwrap()
-                    .insert(key, value, &mut allocate)
+            let insert_status = leaf.as_node_mut(move |mut node: Node<K, &mut [u8], _>| {
+                node.as_leaf_mut().insert(key, value, &mut allocate)
             });
 
             match insert_status {
@@ -270,12 +269,12 @@ where
                 let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
                 let mut allocate = || {
                     let uninit = MemPage::new(self.static_settings.page_size.try_into().unwrap());
-                    Node::new_internal(key_size, uninit)
+                    Node::<_, _, marker::Internal>::new(key_size, uninit)
                 };
 
+                let node = node.downcast();
                 match node.as_node_mut(|mut node| {
                     node.as_internal_mut()
-                        .unwrap()
                         .insert(split_key, right_id, &mut allocate)
                 }) {
                     InternalInsertStatus::Ok => return Ok(()),
@@ -310,27 +309,27 @@ where
         left_child: PageId,
         right_child: PageId,
         key: K,
-    ) -> Node<K, MemPage> {
+    ) -> Node<K, MemPage, marker::Internal> {
         let page = MemPage::new(self.static_settings.page_size.try_into().unwrap());
-        let mut node = Node::new_internal(
+        let mut node = Node::<_, _, marker::Internal>::new(
             self.static_settings.key_buffer_size.try_into().unwrap(),
             page,
         );
 
         node.as_internal_mut()
-            .unwrap()
             .insert_first(key, left_child, right_child);
 
         node
     }
 
     pub fn lookup(&self, key: &K) -> Option<Value> {
+        // TODO: add type information to search?
         let page_ref = self.search(key);
 
-        page_ref.as_node(|node: Node<K, &[u8]>| {
-            match node.as_leaf().unwrap().keys().binary_search(key) {
+        page_ref.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
+            match node.try_as_leaf().unwrap().keys().binary_search(key) {
                 Ok(pos) => node
-                    .as_leaf()
+                    .try_as_leaf()
                     .unwrap()
                     .values()
                     .get(pos)
@@ -340,7 +339,7 @@ where
         })
     }
 
-    fn search(&self, key: &K) -> PageRef {
+    fn search(&self, key: &K) -> PageRef<marker::LeafOrInternal> {
         // TODO: Care, requesting a read transaction should enforce that it's not released until is finished
         // in this case, this acts like a lock, but if it does get released then the data may be overwritten
         let read_transaction = self.transaction_manager.read_transaction();
@@ -348,24 +347,25 @@ where
         let mut current = self.pages.get_page(read_transaction.root()).unwrap();
 
         loop {
-            let new_current: Option<PageRef> = current.as_node(|node: Node<K, &[u8]>| {
-                node.as_internal().map(|inode| {
-                    let upper_pivot = match inode.keys().binary_search(key) {
-                        Ok(pos) => Some(pos + 1),
-                        Err(pos) => Some(pos),
-                    }
-                    .filter(|pos| pos < &inode.children().len());
+            let new_current: Option<PageRef<marker::LeafOrInternal>> =
+                current.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
+                    node.try_as_internal().map(|inode| {
+                        let upper_pivot = match inode.keys().binary_search(key) {
+                            Ok(pos) => Some(pos + 1),
+                            Err(pos) => Some(pos),
+                        }
+                        .filter(|pos| pos < &inode.children().len());
 
-                    let new_current_id = if let Some(upper_pivot) = upper_pivot {
-                        inode.children().get(upper_pivot).unwrap().clone()
-                    } else {
-                        let last = inode.children().len().checked_sub(1).unwrap();
-                        inode.children().get(last).unwrap().clone()
-                    };
+                        let new_current_id = if let Some(upper_pivot) = upper_pivot {
+                            inode.children().get(upper_pivot).unwrap().clone()
+                        } else {
+                            let last = inode.children().len().checked_sub(1).unwrap();
+                            inode.children().get(last).unwrap().clone()
+                        };
 
-                    self.pages.get_page(new_current_id).unwrap()
-                })
-            });
+                        self.pages.get_page(new_current_id).unwrap()
+                    })
+                });
 
             if let Some(new_current) = new_current {
                 current = new_current;
@@ -398,6 +398,7 @@ mod tests {
     use super::*;
     use crate::tests::U64Key;
     use crate::Key;
+    use std::mem::size_of;
     use std::sync::Arc;
     use tempfile::tempfile;
 
@@ -427,27 +428,29 @@ mod tests {
                 if n == root_id {
                     println!("ROOT");
                 }
-                page_ref.as_node(|node: Node<K, &[u8]>| match node.get_tag() {
-                    node::NodeTag::Internal => {
-                        println!("Internal Node");
-                        println!("keys: ");
-                        for k in node.as_internal().unwrap().keys().into_iter() {
-                            println!("{:?}", k.borrow());
+                page_ref.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
+                    match node.get_tag() {
+                        node::NodeTag::Internal => {
+                            println!("Internal Node");
+                            println!("keys: ");
+                            for k in node.try_as_internal().unwrap().keys().into_iter() {
+                                println!("{:?}", k.borrow());
+                            }
+                            println!("children: ");
+                            for c in node.try_as_internal().unwrap().children().into_iter() {
+                                println!("{:?}", c.borrow());
+                            }
                         }
-                        println!("children: ");
-                        for c in node.as_internal().unwrap().children().into_iter() {
-                            println!("{:?}", c.borrow());
-                        }
-                    }
-                    node::NodeTag::Leaf => {
-                        println!("Leaf Node");
-                        println!("keys: ");
-                        for k in node.as_leaf().unwrap().keys().into_iter() {
-                            println!("{:?}", k.borrow());
-                        }
-                        println!("values: ");
-                        for v in node.as_leaf().unwrap().values().into_iter() {
-                            println!("{:?}", v.borrow());
+                        node::NodeTag::Leaf => {
+                            println!("Leaf Node");
+                            println!("keys: ");
+                            for k in node.try_as_leaf().unwrap().keys().into_iter() {
+                                println!("{:?}", k.borrow());
+                            }
+                            println!("values: ");
+                            for v in node.try_as_leaf().unwrap().values().into_iter() {
+                                println!("{:?}", v.borrow());
+                            }
                         }
                     }
                 });
@@ -473,7 +476,6 @@ mod tests {
         tree
     }
 
-    use std::mem::size_of;
     #[test]
     fn insert_many() {
         let tree = new_tree();

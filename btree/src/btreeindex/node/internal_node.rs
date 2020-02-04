@@ -1,4 +1,4 @@
-use super::Node;
+use super::{marker, Node};
 use crate::btreeindex::{Children, ChildrenMut, Keys, KeysMut, PageId};
 use crate::Key;
 use crate::MemPage;
@@ -27,7 +27,7 @@ pub(crate) struct InternalNode<'a, K, T: 'a> {
 /// Also LEN == LEN(KEYS) == LEN(CHILDREN) - 1
 pub(crate) enum InternalInsertStatus<K> {
     Ok,
-    Split(K, Node<K, MemPage>),
+    Split(K, Node<K, MemPage, marker::Internal>),
     DuplicatedKey(K),
 }
 
@@ -94,7 +94,7 @@ where
         &'me mut self,
         key: K,
         node_id: PageId,
-        allocate: impl FnMut() -> Node<K, MemPage>,
+        allocate: impl FnMut() -> Node<K, MemPage, marker::Internal>,
     ) -> InternalInsertStatus<K> {
         // Non empty, maybe encapsulate in some kind of state machine
         assert!(self.keys().len() > 0);
@@ -132,7 +132,7 @@ where
         pos: usize,
         key: K,
         node_id: PageId,
-        mut allocate: impl FnMut() -> Node<K, MemPage>,
+        mut allocate: impl FnMut() -> Node<K, MemPage, marker::Internal>,
     ) -> InternalInsertStatus<K> {
         let current_len = self.keys().len();
         let m = self.lower_bound().checked_sub(1).unwrap();
@@ -158,7 +158,7 @@ where
 
                 // the key would be inserted in the first half
                 if pos < m.try_into().unwrap() {
-                    let mut right_node_internal = right_node.as_internal_mut().unwrap();
+                    let mut right_node_internal = right_node.as_internal_mut();
                     let split_key = self.keys().get(m - 1 as usize).unwrap().borrow().clone();
 
                     let mut keys_mut = right_node_internal.keys_mut();
@@ -192,7 +192,7 @@ where
                 }
                 // the key would be inserted in the last half
                 else if pos > m.try_into().unwrap() {
-                    let mut right_internal_node = right_node.as_internal_mut().unwrap();
+                    let mut right_internal_node = right_node.as_internal_mut();
                     let split_key = self.keys().get(m as usize).unwrap().borrow().clone();
 
                     let mut keys_mut = right_internal_node.keys_mut();
@@ -230,7 +230,7 @@ where
                     InternalInsertStatus::Split(split_key.clone(), right_node)
                 } else {
                     // pos == m
-                    let mut right_internal_node = right_node.as_internal_mut().unwrap();
+                    let mut right_internal_node = right_node.as_internal_mut();
 
                     let split_key = key;
 

@@ -1,10 +1,12 @@
-use crate::btreeindex::node::Node;
+use crate::btreeindex::node::{marker, Node};
 use crate::btreeindex::PageId;
 use crate::storage::{MmapStorage, Storage};
 use crate::Key;
 use crate::MemPage;
 use byteorder::{ByteOrder, LittleEndian};
 use std::convert::{TryFrom, TryInto};
+use std::fmt;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 /// An abstraction over a paged file, Pages is kind of an array but backed from disk. Page represents at the moment
@@ -65,7 +67,7 @@ impl Pages {
         page
     }
 
-    pub(crate) fn write_page(&self, page: Page) -> Result<(), std::io::Error> {
+    pub(crate) fn write_page<T>(&self, page: Page<T>) -> Result<(), std::io::Error> {
         let mem_page = &page.mem_page;
         let page_id = page.page_id;
 
@@ -81,7 +83,7 @@ impl Pages {
         Ok(())
     }
 
-    pub(crate) fn get_page<'a>(&'a self, id: PageId) -> Option<PageRef> {
+    pub(crate) fn get_page<'a, Kind>(&'a self, id: PageId) -> Option<PageRef<Kind>> {
         // TODO: Check the id is in range?
         let page = self.read_page(id);
 
@@ -89,9 +91,10 @@ impl Pages {
             page_id: id,
             key_buffer_size: self.key_buffer_size,
             mem_page: page,
+            marker: PhantomData,
         });
 
-        Some(page_ref.clone())
+        Some(PageRef(page_ref.0.clone()))
     }
 
     pub(crate) fn sync_file(&self) -> Result<(), std::io::Error> {
@@ -102,50 +105,45 @@ impl Pages {
     }
 }
 
-use std::fmt;
-impl fmt::Debug for Page {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tag = LittleEndian::read_u64(&self.mem_page.as_ref()[0..8]);
-        write!(f, "Page {{ page_id: {}, tag: {} }}", self.page_id, tag)
-    }
-}
-
-pub(crate) struct Page {
+pub(crate) struct Page<Kind> {
     pub page_id: PageId,
     pub key_buffer_size: u32,
     pub mem_page: MemPage,
+    marker: PhantomData<Kind>,
 }
 
 #[derive(Clone)]
-pub(crate) struct PageRef(Arc<Page>);
+pub(crate) struct PageRef<Kind>(Arc<Page<Kind>>);
 
-unsafe impl Send for PageRef {}
-unsafe impl Sync for PageRef {}
+unsafe impl<Kind: Send> Send for PageRef<Kind> {}
+unsafe impl<Kind: Sync> Sync for PageRef<Kind> {}
 
-impl std::ops::Deref for PageRef {
-    type Target = Arc<Page>;
+impl<Kind> std::ops::Deref for PageRef<Kind> {
+    type Target = Arc<Page<Kind>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl Page {
-    pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8]>) -> R) -> R
+impl<Kind> Page<Kind> {
+    pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8], Kind>) -> R) -> R
     where
         K: Key,
     {
         let page: &[u8] = self.mem_page.as_ref();
-        let node =
-            Node::<K, &[u8]>::from_raw(page.as_ref(), self.key_buffer_size.try_into().unwrap());
+        let node = Node::<K, &[u8], Kind>::from_raw(
+            page.as_ref(),
+            self.key_buffer_size.try_into().unwrap(),
+        );
         f(node)
     }
 
-    pub(crate) fn as_node_mut<K, R>(&mut self, f: impl FnOnce(Node<K, &mut [u8]>) -> R) -> R
+    pub(crate) fn as_node_mut<K, R>(&mut self, f: impl FnOnce(Node<K, &mut [u8], Kind>) -> R) -> R
     where
         K: Key,
     {
         let page = self.mem_page.as_mut();
-        let node = Node::<K, &mut [u8]>::from_raw_mut(
+        let node = Node::<K, &mut [u8], Kind>::from_raw_mut(
             page.as_mut(),
             self.key_buffer_size.try_into().unwrap(),
         );
@@ -157,24 +155,44 @@ impl Page {
     }
 }
 
-impl PageRef {
-    pub(crate) fn new(page: Page) -> Self {
+impl Page<marker::LeafOrInternal> {
+    pub fn downcast<To>(self) -> Page<To> {
+        let Page {
+            page_id,
+            key_buffer_size,
+            mem_page,
+            marker,
+        } = self;
+
+        Page {
+            page_id,
+            key_buffer_size,
+            mem_page,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<Kind> PageRef<Kind> {
+    pub(crate) fn new(page: Page<Kind>) -> Self {
         PageRef(Arc::new(page))
     }
 
-    pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8]>) -> R) -> R
+    pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8], Kind>) -> R) -> R
     where
         K: Key,
     {
         self.0.as_node(f)
     }
 
-    pub(crate) fn get_mut(&self) -> Page {
+    /// Clone this given page, this is similar as Cow::get_mut()
+    pub(crate) fn get_mut(&self) -> Page<Kind> {
         let page = &self.0;
         Page {
             page_id: page.page_id,
             key_buffer_size: page.key_buffer_size,
             mem_page: page.mem_page.clone(),
+            marker: PhantomData,
         }
     }
 }

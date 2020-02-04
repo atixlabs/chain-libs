@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use super::Node;
+use super::{marker, Node};
 use crate::btreeindex::{Keys, KeysMut, PageId, Values, ValuesMut};
 use crate::Key;
 use crate::MemPage;
@@ -14,7 +14,7 @@ use std::mem::size_of;
 
 pub(crate) enum LeafInsertStatus<K> {
     Ok,
-    Split(K, Node<K, MemPage>),
+    Split(K, Node<K, MemPage, marker::Leaf>),
     DuplicatedKey(K),
 }
 
@@ -72,7 +72,7 @@ where
         &mut self,
         key: K,
         value: V,
-        allocate: impl FnMut() -> Node<K, MemPage>,
+        allocate: impl FnMut() -> Node<K, MemPage, marker::Leaf>,
     ) -> LeafInsertStatus<K> {
         match self.keys().binary_search(&key) {
             Ok(_) => LeafInsertStatus::DuplicatedKey(key),
@@ -90,7 +90,7 @@ where
         allocate: Option<F>,
     ) -> LeafInsertStatus<K>
     where
-        F: FnMut() -> Node<K, MemPage>,
+        F: FnMut() -> Node<K, MemPage, marker::Leaf>,
     {
         let current_len = self.keys().len();
         let m = self.lower_bound();
@@ -115,7 +115,7 @@ where
                         .zip(self.values().sub(m - 1..self.values().len()).into_iter())
                         .enumerate()
                     {
-                        match right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
+                        match right_node.as_leaf_mut().insert_key_value::<F>(
                             i,
                             k.borrow().clone(),
                             v,
@@ -144,7 +144,7 @@ where
                         .into_iter()
                         .zip(self.values().sub(m..pos).into_iter())
                     {
-                        right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
+                        right_node.as_leaf_mut().insert_key_value::<F>(
                             position,
                             k.borrow().clone(),
                             v,
@@ -153,7 +153,7 @@ where
                         position += 1;
                     }
 
-                    right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
+                    right_node.as_leaf_mut().insert_key_value::<F>(
                         position,
                         key.clone(),
                         value.clone(),
@@ -167,7 +167,7 @@ where
                         .into_iter()
                         .zip(self.values().sub(pos..self.values().len()).into_iter())
                     {
-                        right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
+                        right_node.as_leaf_mut().insert_key_value::<F>(
                             position,
                             k.borrow().clone(),
                             v,
@@ -184,12 +184,9 @@ where
 
                     let split_key = key.clone();
 
-                    right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
-                        0,
-                        key.clone(),
-                        value,
-                        None,
-                    );
+                    right_node
+                        .as_leaf_mut()
+                        .insert_key_value::<F>(0, key.clone(), value, None);
 
                     let mut position = 1;
 
@@ -199,7 +196,7 @@ where
                         .into_iter()
                         .zip(self.values().sub(m..self.values().len()).into_iter())
                     {
-                        right_node.as_leaf_mut().unwrap().insert_key_value::<F>(
+                        right_node.as_leaf_mut().insert_key_value::<F>(
                             position,
                             k.borrow().clone(),
                             v,

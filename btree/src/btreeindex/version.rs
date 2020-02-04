@@ -2,8 +2,8 @@ use super::metadata::Metadata;
 use super::page_manager::PageManager;
 
 use super::pages::*;
-use super::Node;
 use super::PageId;
+use super::{marker, Node};
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::collections::{HashMap, VecDeque};
@@ -51,7 +51,7 @@ pub(crate) enum WriteTransactionBuilder<'a, 'index> {
 pub(crate) struct InsertTransactionBuilder<'index, 'locks: 'index> {
     pages: &'index Pages,
     current_root: PageId,
-    extra: HashMap<PageId, Page>,
+    extra: HashMap<PageId, Page<marker::LeafOrInternal>>,
     old_ids: Vec<PageId>,
     current: Option<usize>,
     page_manager: MutexGuard<'locks, PageManager>,
@@ -66,7 +66,7 @@ where
     K: Key,
 {
     builder: &'txbuilder mut InsertTransactionBuilder<'txmanager, 'index>,
-    backtrack: Vec<(Option<PageId>, Page)>,
+    backtrack: Vec<(Option<PageId>, Page<marker::LeafOrInternal>)>,
     new_root: Option<PageId>,
     phantom_key: PhantomData<[K]>,
 }
@@ -194,6 +194,7 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
             page_id: id,
             mem_page,
             key_buffer_size,
+            marker: PhantomData,
         };
 
         // TODO: handle this error
@@ -205,7 +206,10 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
         self.current_root
     }
 
-    pub(crate) fn mut_page(&mut self, id: PageId) -> Option<(Option<PageId>, Page)> {
+    pub(crate) fn mut_page(
+        &mut self,
+        id: PageId,
+    ) -> Option<(Option<PageId>, Page<marker::LeafOrInternal>)> {
         match self.extra.remove(&id) {
             Some(page) => Some((None, page)),
             None => {
@@ -223,7 +227,7 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
         }
     }
 
-    pub(crate) fn add_shadow(&mut self, old_id: PageId, shadow: Page) {
+    pub(crate) fn add_shadow(&mut self, old_id: PageId, shadow: Page<marker::LeafOrInternal>) {
         self.extra.insert(shadow.page_id, shadow);
         self.old_ids.push(old_id);
     }
@@ -278,8 +282,8 @@ where
         loop {
             let (old_id, page) = self.builder.mut_page(current).unwrap();
 
-            let found_leaf = page.as_node(|node: Node<K, &[u8]>| {
-                if let Some(inode) = node.as_internal() {
+            let found_leaf = page.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
+                if let Some(inode) = node.try_as_internal() {
                     let upper_pivot = match inode.keys().binary_search(key) {
                         Ok(pos) => Some(pos + 1),
                         Err(pos) => Some(pos),
@@ -306,7 +310,7 @@ where
         }
     }
 
-    pub(crate) fn get_next(&mut self) -> Option<&mut Page> {
+    pub(crate) fn get_next(&mut self) -> Option<&mut Page<marker::LeafOrInternal>> {
         let (old_id, last) = match self.backtrack.pop() {
             Some(pair) => pair,
             None => return None,
@@ -335,8 +339,10 @@ where
             None => return,
         };
 
-        parent.as_node_mut(|mut node: Node<K, &mut [u8]>| {
-            let mut node = node.as_internal_mut().unwrap();
+        let parent = parent.downcast();
+
+        parent.as_node_mut(|mut node: Node<K, &mut [u8], marker::Internal>| {
+            let mut node = node.as_internal_mut();
             let pos_to_update = match node.children().linear_search(&old_id) {
                 Some(pos) => pos,
                 None => unreachable!(),
