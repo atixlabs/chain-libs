@@ -11,47 +11,47 @@ use std::marker::PhantomData;
 
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-pub(crate) struct TransactionManager {
+pub struct TransactionManager {
     latest_version: Arc<RwLock<Arc<Version>>>,
     versions: Mutex<VecDeque<Arc<Version>>>,
     page_manager: Mutex<PageManager>,
 }
 
-pub(crate) struct Version {
+pub struct Version {
     root: PageId,
     transaction: WriteTransaction,
 }
 
 /// delta-like structure, it has the list of pages that can be collected after no readers are using them
-pub(crate) struct WriteTransaction {
+pub struct WriteTransaction {
     new_root: PageId,
     shadowed_pages: Vec<PageId>,
     next_page_id: PageId,
 }
 
 /// this has locks, so no new transaction can occur while this is synced to disk
-pub(crate) struct Checkpoint<'a> {
-    pub(crate) new_metadata: Metadata,
+pub struct Checkpoint<'a> {
+    pub new_metadata: Metadata,
     page_manager: MutexGuard<'a, PageManager>,
     versions: MutexGuard<'a, VecDeque<Arc<Version>>>,
 }
 
 impl Version {
-    pub(crate) fn root(&self) -> PageId {
+    pub fn root(&self) -> PageId {
         self.root
     }
 }
 
-pub(crate) enum WriteTransactionBuilder<'a, 'index> {
+pub enum WriteTransactionBuilder<'a, 'index> {
     Insert(InsertTransactionBuilder<'a, 'index>),
 }
 
 /// staging area for batched insertions, it will keep track of pages already shadowed and reuse them,
 /// it can be used to create a new `Version` at the end with all the insertions done atomically
-pub(crate) struct InsertTransactionBuilder<'index, 'locks: 'index> {
+pub struct InsertTransactionBuilder<'index, 'locks: 'index> {
     pages: &'index Pages,
-    current_root: PageId,
-    extra: HashMap<PageId, Page<marker::LeafOrInternal>>,
+    pub current_root: PageId,
+    pub shadowed_pages: HashMap<PageId, Page<marker::LeafOrInternal>>,
     old_ids: Vec<PageId>,
     current: Option<usize>,
     page_manager: MutexGuard<'locks, PageManager>,
@@ -59,16 +59,12 @@ pub(crate) struct InsertTransactionBuilder<'index, 'locks: 'index> {
     current_version: Arc<RwLock<Arc<Version>>>,
 }
 
-/// this is basically a stack, but it will rename pointers and interact with the builder in order to reuse
-/// already cloned pages
-pub(crate) struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
-where
-    K: Key,
-{
-    builder: &'txbuilder mut InsertTransactionBuilder<'txmanager, 'index>,
-    backtrack: Vec<(Option<PageId>, Page<marker::LeafOrInternal>)>,
-    new_root: Option<PageId>,
-    phantom_key: PhantomData<[K]>,
+pub enum MutPage {
+    AlreadyInTransaction(Page<marker::LeafOrInternal>),
+    Shadows {
+        old_id: PageId,
+        page: Page<marker::LeafOrInternal>,
+    },
 }
 
 impl TransactionManager {
@@ -109,7 +105,7 @@ impl TransactionManager {
 
         InsertTransactionBuilder {
             current_root: self.latest_version().root(),
-            extra: HashMap::new(),
+            shadowed_pages: HashMap::new(),
             old_ids: vec![],
             pages,
             current: None,
@@ -167,28 +163,11 @@ impl TransactionManager {
 }
 
 impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index> {
-    /// create a staging area for a single insert
-    pub(crate) fn backtrack<'me, K>(&'me mut self) -> InsertBacktrack<'me, 'txmanager, 'index, K>
-    where
-        K: Key,
-    {
-        InsertBacktrack {
-            builder: self,
-            backtrack: vec![],
-            new_root: None,
-            phantom_key: PhantomData,
-        }
-    }
-
-    pub(crate) fn delete_node(&mut self, id: PageId) {
+    pub fn delete_node(&mut self, id: PageId) {
         self.old_ids.push(id);
     }
 
-    pub(crate) fn add_new_node(
-        &mut self,
-        mem_page: crate::mem_page::MemPage,
-        key_buffer_size: u32,
-    ) -> PageId {
+    pub fn add_new_node(&mut self, mem_page: crate::mem_page::MemPage) -> PageId {
         let id = self.page_manager.new_id();
         let page = Page {
             page_id: id,
@@ -197,21 +176,17 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
             marker: PhantomData,
         };
 
-        // TODO: handle this error
-        self.extra.insert(page.page_id, page);
+        self.shadowed_pages.insert(page.page_id, page);
         id
     }
 
-    pub(crate) fn current_root(&self) -> PageId {
+    pub fn current_root(&self) -> PageId {
         self.current_root
     }
 
-    pub(crate) fn mut_page(
-        &mut self,
-        id: PageId,
-    ) -> Option<(Option<PageId>, Page<marker::LeafOrInternal>)> {
-        match self.extra.remove(&id) {
-            Some(page) => Some((None, page)),
+    pub fn mut_page(&mut self, id: PageId) -> Option<MutPage> {
+        match self.shadowed_pages.remove(&id) {
+            Some(page) => Some(MutPage::AlreadyInTransaction(page)),
             None => {
                 let page = match self.pages.get_page(id).map(|page| page.get_mut()) {
                     Some(page) => page,
@@ -222,29 +197,32 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
                 let old_id = shadow.page_id;
                 shadow.page_id = self.page_manager.new_id();
 
-                Some((Some(old_id), shadow))
+                Some(MutPage::Shadows {
+                    old_id,
+                    page: shadow,
+                })
             }
         }
     }
 
-    pub(crate) fn add_shadow(&mut self, old_id: PageId, shadow: Page<marker::LeafOrInternal>) {
-        self.extra.insert(shadow.page_id, shadow);
+    pub fn add_shadow(&mut self, old_id: PageId, shadow: Page<marker::LeafOrInternal>) {
+        self.shadowed_pages.insert(shadow.page_id, shadow);
         self.old_ids.push(old_id);
     }
 
-    pub(crate) fn has_next(&self) -> bool {
+    pub fn has_next(&self) -> bool {
         self.current.is_some()
     }
 
     /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
     /// available to new readers
-    pub(crate) fn commit<K>(mut self)
+    pub fn commit<K>(mut self)
     where
         K: Key,
     {
         let pages = self.pages;
 
-        for (_id, page) in self.extra.drain() {
+        for (_id, page) in self.shadowed_pages.drain() {
             pages.write_page(page).unwrap();
         }
 
@@ -268,119 +246,6 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
     // not really needed because the destructor has basically the same effect right now
     pub(crate) fn abort(self) {
         unimplemented!()
-    }
-}
-
-impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
-    InsertBacktrack<'txbuilder, 'txmanager, 'index, K>
-where
-    K: Key,
-{
-    pub(crate) fn search_for(&mut self, key: &K) {
-        let mut current = self.builder.current_root();
-
-        loop {
-            let (old_id, page) = self.builder.mut_page(current).unwrap();
-
-            let found_leaf = page.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
-                if let Some(inode) = node.try_as_internal() {
-                    let upper_pivot = match inode.keys().binary_search(key) {
-                        Ok(pos) => Some(pos + 1),
-                        Err(pos) => Some(pos),
-                    }
-                    .filter(|pos| pos < &inode.children().len());
-
-                    if let Some(upper_pivot) = upper_pivot {
-                        current = inode.children().get(upper_pivot).unwrap().clone();
-                    } else {
-                        let last = inode.children().len().checked_sub(1).unwrap();
-                        current = inode.children().get(last).unwrap().clone();
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
-
-            self.backtrack.push((old_id, page));
-
-            if found_leaf {
-                break;
-            }
-        }
-    }
-
-    pub(crate) fn get_next(&mut self) -> Option<&mut Page<marker::LeafOrInternal>> {
-        let (old_id, last) = match self.backtrack.pop() {
-            Some(pair) => pair,
-            None => return None,
-        };
-
-        let id = last.page_id;
-
-        if self.backtrack.is_empty() {
-            assert!(self.new_root.is_none());
-            self.new_root = Some(id);
-        }
-
-        if let Some(old_id) = old_id {
-            self.rename_parent(old_id, id);
-            self.builder.add_shadow(old_id, last);
-        } else {
-            self.builder.extra.insert(id, last);
-        }
-
-        self.builder.extra.get_mut(&id)
-    }
-
-    pub(crate) fn rename_parent(&mut self, old_id: PageId, new_id: PageId) {
-        let parent = match self.backtrack.last_mut() {
-            Some((_, parent)) => parent,
-            None => return,
-        };
-
-        let parent = parent.downcast();
-
-        parent.as_node_mut(|mut node: Node<K, &mut [u8], marker::Internal>| {
-            let mut node = node.as_internal_mut();
-            let pos_to_update = match node.children().linear_search(&old_id) {
-                Some(pos) => pos,
-                None => unreachable!(),
-            };
-
-            node.children_mut().update(pos_to_update, &new_id).unwrap();
-        });
-    }
-
-    pub(crate) fn has_next(&self) -> bool {
-        self.backtrack.last().is_some()
-    }
-
-    pub(crate) fn current_root(&self) -> PageId {
-        self.builder.current_root()
-    }
-
-    pub(crate) fn add_new_node(&mut self, mem_page: MemPage, key_buffer_size: u32) -> PageId {
-        self.builder.add_new_node(mem_page, key_buffer_size)
-    }
-
-    pub(crate) fn new_root(&mut self, mem_page: MemPage, key_buffer_size: u32) {
-        let id = self.builder.add_new_node(mem_page, key_buffer_size);
-        self.new_root = Some(id);
-    }
-}
-
-impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K> Drop
-    for InsertBacktrack<'txbuilder, 'txmanager, 'index, K>
-where
-    K: Key,
-{
-    fn drop(&mut self) {
-        while let Some(_) = InsertBacktrack::<'txbuilder, 'txmanager, 'index, K>::get_next(self) {
-            ()
-        }
-
-        self.builder.current_root = self.new_root.unwrap();
     }
 }
 

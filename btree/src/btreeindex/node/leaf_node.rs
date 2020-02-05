@@ -47,7 +47,8 @@ where
     }
 
     /// read an already initialized slice of bytes as a leaf node
-    pub(crate) fn from_raw(key_buffer_size: usize, data: T) -> LeafNode<'b, K, T> {
+    /// this is unsafe because it's interpreting raw bytes
+    pub(crate) unsafe fn from_raw_mut(key_buffer_size: usize, data: T) -> LeafNode<'b, K, T> {
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
         assert!(key_buffer_size % 8 == 0);
@@ -55,9 +56,7 @@ where
         let size_per_key = key_buffer_size + size_of::<V>();
         let extra_size = LEN_SIZE;
 
-        let max_keys = (usize::try_from(data.as_ref().len()).unwrap()
-            - usize::try_from(extra_size).unwrap())
-            / size_per_key;
+        let max_keys = data.as_ref().len() - extra_size / size_per_key;
 
         LeafNode {
             max_keys,
@@ -244,16 +243,15 @@ where
     T: AsRef<[u8]> + 'b,
 {
     /// same as from_raw but for inmutable slices
-    pub(crate) fn view(key_buffer_size: usize, data: T) -> LeafNode<'b, K, T> {
+    /// this is unsafe because it's interpreting raw bytes
+    pub(crate) unsafe fn from_raw(key_buffer_size: usize, data: T) -> LeafNode<'b, K, T> {
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
 
         let size_per_key = key_buffer_size + size_of::<V>();
         let extra_size = LEN_SIZE;
 
-        let max_keys = (usize::try_from(data.as_ref().len()).unwrap()
-            - usize::try_from(extra_size).unwrap())
-            / size_per_key;
+        let max_keys = data.as_ref().len() - extra_size / size_per_key;
 
         LeafNode {
             max_keys,

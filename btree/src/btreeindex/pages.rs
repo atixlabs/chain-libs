@@ -126,6 +126,22 @@ impl<Kind> std::ops::Deref for PageRef<Kind> {
 }
 
 impl<Kind> Page<Kind> {
+    pub(crate) fn coerce<To>(self) -> Page<To> {
+        let Page {
+            page_id,
+            key_buffer_size,
+            mem_page,
+            ..
+        } = self;
+
+        Page {
+            page_id,
+            key_buffer_size,
+            mem_page,
+            marker: PhantomData,
+        }
+    }
+
     pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8], Kind>) -> R) -> R
     where
         K: Key,
@@ -152,24 +168,6 @@ impl<Kind> Page<Kind> {
 
     pub(crate) fn id(&self) -> PageId {
         self.page_id
-    }
-}
-
-impl Page<marker::LeafOrInternal> {
-    pub fn downcast<To>(self) -> Page<To> {
-        let Page {
-            page_id,
-            key_buffer_size,
-            mem_page,
-            marker,
-        } = self;
-
-        Page {
-            page_id,
-            key_buffer_size,
-            mem_page,
-            marker: PhantomData,
-        }
     }
 }
 

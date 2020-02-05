@@ -46,8 +46,8 @@ where
 
     /// mutable version of node interpretated over the given slice
     /// this shouldn't be called before calling `init`
-    // TODO: add more rigorous type checking?
-    pub fn from_raw(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
+    /// this is unsafe because it's interpreting raw bytes
+    pub unsafe fn from_raw_mut(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
         assert!(data.as_ref().len() > 0);
@@ -55,10 +55,7 @@ where
         let size_per_key = key_buffer_size + size_of::<PageId>();
         let extra_size = LEN_SIZE - LEN_START;
 
-        let max_keys = (usize::try_from(data.as_ref().len()).unwrap()
-            - usize::try_from(extra_size).unwrap()
-            - size_of::<PageId>())
-            / size_per_key;
+        let max_keys = data.as_ref().len() - extra_size - size_of::<PageId>() / size_per_key;
 
         InternalNode {
             max_keys,
@@ -270,7 +267,8 @@ where
     K: Key,
     T: AsRef<[u8]> + 'b,
 {
-    pub fn view(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
+    /// this is unsafe because it's interpreting raw bytes
+    pub unsafe fn from_raw(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
         assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
         assert!(data.as_ref().len() > 0);
@@ -278,10 +276,7 @@ where
         let size_per_key = key_buffer_size + size_of::<PageId>();
         let extra_size = LEN_SIZE - LEN_START;
 
-        let max_keys = (usize::try_from(data.as_ref().len()).unwrap()
-            - usize::try_from(extra_size).unwrap()
-            - size_of::<PageId>())
-            / size_per_key;
+        let max_keys = (data.as_ref().len() - extra_size - size_of::<PageId>()) / size_per_key;
 
         InternalNode {
             max_keys,

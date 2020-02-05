@@ -81,7 +81,7 @@ where
     K: Key,
     T: AsMut<[u8]> + AsRef<[u8]> + 'b,
 {
-    pub(crate) fn from_raw_mut(data: T, key_buffer_size: usize) -> Node<K, T, Kind> {
+    pub(crate) unsafe fn from_raw_mut(data: T, key_buffer_size: usize) -> Node<K, T, Kind> {
         Node {
             data,
             key_buffer_size,
@@ -98,9 +98,9 @@ where
 {
     pub(crate) fn as_internal<'i: 'b>(&'i self) -> InternalNode<'b, K, &[u8]> {
         match self.get_tag() {
-            NodeTag::Internal => {
-                InternalNode::view(self.key_buffer_size, &self.data.as_ref()[LEN_SIZE..])
-            }
+            NodeTag::Internal => unsafe {
+                InternalNode::from_raw(self.key_buffer_size, &self.data.as_ref()[LEN_SIZE..])
+            },
             NodeTag::Leaf => panic!("corrupted internal node"),
         }
     }
@@ -113,7 +113,9 @@ where
 {
     pub(crate) fn as_leaf<'i: 'b>(&'i self) -> LeafNode<'b, K, &[u8]> {
         match self.get_tag() {
-            NodeTag::Leaf => LeafNode::view(self.key_buffer_size, &self.data.as_ref()[LEN_SIZE..]),
+            NodeTag::Leaf => unsafe {
+                LeafNode::from_raw(self.key_buffer_size, &self.data.as_ref()[LEN_SIZE..])
+            },
             NodeTag::Internal => panic!("corrupted leaf node"),
         }
     }
@@ -124,7 +126,7 @@ where
     K: Key,
     T: AsRef<[u8]> + 'b,
 {
-    pub(crate) fn from_raw(data: T, key_buffer_size: usize) -> Node<K, T, Kind> {
+    pub(crate) unsafe fn from_raw(data: T, key_buffer_size: usize) -> Node<K, T, Kind> {
         Node {
             data,
             key_buffer_size,
@@ -145,20 +147,24 @@ where
 
     pub(crate) fn try_as_leaf<'i: 'b>(&'i self) -> Option<LeafNode<'b, K, &[u8]>> {
         match self.get_tag() {
-            NodeTag::Leaf => Some(LeafNode::view(
-                self.key_buffer_size,
-                &self.data.as_ref()[LEN_SIZE..],
-            )),
+            NodeTag::Leaf => unsafe {
+                Some(LeafNode::from_raw(
+                    self.key_buffer_size,
+                    &self.data.as_ref()[LEN_SIZE..],
+                ))
+            },
             NodeTag::Internal => None,
         }
     }
 
     pub(crate) fn try_as_internal<'i: 'b>(&'i self) -> Option<InternalNode<'b, K, &[u8]>> {
         match self.get_tag() {
-            NodeTag::Internal => Some(InternalNode::view(
-                self.key_buffer_size,
-                &self.data.as_ref()[LEN_SIZE..],
-            )),
+            NodeTag::Internal => unsafe {
+                Some(InternalNode::from_raw(
+                    self.key_buffer_size,
+                    &self.data.as_ref()[LEN_SIZE..],
+                ))
+            },
             NodeTag::Leaf => None,
         }
     }

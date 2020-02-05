@@ -1,3 +1,4 @@
+mod insertion;
 mod metadata;
 mod node;
 mod page_manager;
@@ -5,6 +6,7 @@ mod pages;
 #[allow(dead_code)]
 mod version;
 
+use insertion::{InPath, InsertBacktrack};
 use version::*;
 
 use crate::mem_page::MemPage;
@@ -192,148 +194,14 @@ where
         Ok(())
     }
 
-    fn insert<'a>(
-        &self,
-        tx: &mut InsertTransactionBuilder<'a, 'a>,
-        key: K,
-        value: Value,
-    ) -> Result<(), BTreeStoreError> {
-        let mut backtrack = tx.backtrack();
-        backtrack.search_for(&key);
-
-        let needs_recurse = {
-            let leaf = backtrack.get_next().unwrap();
-            let mut leaf = leaf.downcast();
-            self.insert_in_leaf(&mut leaf, key, value)?
-                .map(|(split_key, new_node)| (leaf.id(), split_key, new_node))
-        };
-
-        if let Some((leaf_id, split_key, new_node)) = needs_recurse {
-            let id =
-                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size);
-
-            if backtrack.has_next() {
-                self.insert_in_internals(split_key, id, &mut backtrack)?;
-            } else {
-                let new_root = self.create_internal_node(leaf_id, id, split_key);
-                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size);
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn insert_in_leaf<'a>(
-        &self,
-        leaf: &mut Page<marker::Leaf>,
-        key: K,
-        value: Value,
-    ) -> Result<Option<(K, Node<K, MemPage, marker::Leaf>)>, BTreeStoreError> {
-        let update = {
-            let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
-            let page_size = usize::try_from(self.static_settings.page_size).unwrap();
-            let mut allocate = || {
-                let uninit = MemPage::new(page_size);
-                Node::<K, MemPage, marker::Leaf>::new(key_size, uninit)
-            };
-
-            let insert_status = leaf.as_node_mut(move |mut node: Node<K, &mut [u8], _>| {
-                node.as_leaf_mut().insert(key, value, &mut allocate)
-            });
-
-            match insert_status {
-                LeafInsertStatus::Ok => None,
-                LeafInsertStatus::DuplicatedKey(_k) => {
-                    return Err(crate::BTreeStoreError::DuplicatedKey)
-                }
-                LeafInsertStatus::Split(split_key, node) => Some((split_key, node)),
-            }
-        };
-
-        Ok(update)
-    }
-
-    // this function recurses on the backtrack splitting internal nodes as needed
-    fn insert_in_internals(
-        &self,
-        key: K,
-        to_insert: PageId,
-        backtrack: &mut InsertBacktrack<K>,
-    ) -> Result<(), BTreeStoreError> {
-        let mut split_key = key;
-        let mut right_id = to_insert;
-        loop {
-            let (current_id, new_split_key, new_node) = {
-                let node = backtrack.get_next().unwrap();
-                let node_id = node.id();
-                let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
-                let mut allocate = || {
-                    let uninit = MemPage::new(self.static_settings.page_size.try_into().unwrap());
-                    Node::<_, _, marker::Internal>::new(key_size, uninit)
-                };
-
-                let node = node.downcast();
-                match node.as_node_mut(|mut node| {
-                    node.as_internal_mut()
-                        .insert(split_key, right_id, &mut allocate)
-                }) {
-                    InternalInsertStatus::Ok => return Ok(()),
-                    InternalInsertStatus::Split(split_key, new_node) => {
-                        (node_id, split_key, new_node)
-                    }
-                    _ => unreachable!(),
-                }
-            };
-
-            let new_id =
-                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size);
-
-            if backtrack.has_next() {
-                // set values to insert in next iteration (recurse on parent)
-                split_key = new_split_key;
-                right_id = new_id;
-            } else {
-                let left_id = current_id;
-                let right_id = new_id;
-                let new_root = self.create_internal_node(left_id, right_id, new_split_key);
-
-                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size);
-                return Ok(());
-            }
-        }
-    }
-
-    // Used when the current root needs a split
-    fn create_internal_node(
-        &self,
-        left_child: PageId,
-        right_child: PageId,
-        key: K,
-    ) -> Node<K, MemPage, marker::Internal> {
-        let page = MemPage::new(self.static_settings.page_size.try_into().unwrap());
-        let mut node = Node::<_, _, marker::Internal>::new(
-            self.static_settings.key_buffer_size.try_into().unwrap(),
-            page,
-        );
-
-        node.as_internal_mut()
-            .insert_first(key, left_child, right_child);
-
-        node
-    }
-
     pub fn lookup(&self, key: &K) -> Option<Value> {
         // TODO: add type information to search?
         let page_ref = self.search(key);
 
         page_ref.as_node(|node: Node<K, &[u8], marker::LeafOrInternal>| {
-            match node.try_as_leaf().unwrap().keys().binary_search(key) {
-                Ok(pos) => node
-                    .try_as_leaf()
-                    .unwrap()
-                    .values()
-                    .get(pos)
-                    .map(|n| *n.borrow()),
+            let leaf = node.try_as_leaf().unwrap();
+            match leaf.keys().binary_search(key) {
+                Ok(pos) => leaf.values().get(pos).map(|n| *n.borrow()),
                 Err(_) => None,
             }
         })
