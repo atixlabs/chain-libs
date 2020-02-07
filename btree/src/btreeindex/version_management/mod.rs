@@ -1,7 +1,9 @@
-use super::metadata::Metadata;
+pub mod transaction;
 use super::page_manager::PageManager;
+use transaction::ReadTransaction;
 
 use super::pages::*;
+use super::Metadata;
 use super::Node;
 use super::PageId;
 use crate::mem_page::MemPage;
@@ -46,19 +48,6 @@ pub(crate) enum WriteTransactionBuilder<'a, 'index> {
     Insert(InsertTransactionBuilder<'a, 'index>),
 }
 
-/// staging area for batched insertions, it will keep track of pages already shadowed and reuse them,
-/// it can be used to create a new `Version` at the end with all the insertions done atomically
-pub(crate) struct InsertTransactionBuilder<'index, 'locks: 'index> {
-    pages: &'index Pages,
-    current_root: PageId,
-    extra: HashMap<PageId, Page>,
-    old_ids: Vec<PageId>,
-    current: Option<usize>,
-    page_manager: MutexGuard<'locks, PageManager>,
-    versions: MutexGuard<'locks, VecDeque<Arc<Version>>>,
-    current_version: Arc<RwLock<Arc<Version>>>,
-}
-
 /// this is basically a stack, but it will rename pointers and interact with the builder in order to reuse
 /// already cloned pages
 pub(crate) struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
@@ -96,8 +85,8 @@ impl TransactionManager {
         self.latest_version.read().unwrap().clone()
     }
 
-    pub fn read_transaction(&self) -> Arc<Version> {
-        self.latest_version()
+    pub fn read_transaction(&self, pages: Pages) -> ReadTransaction {
+        ReadTransaction::new(self.latest_version(), pages)
     }
 
     pub fn insert_transaction<'me, 'index: 'me>(
@@ -163,107 +152,6 @@ impl TransactionManager {
             page_manager,
             versions,
         })
-    }
-}
-
-impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index> {
-    /// create a staging area for a single insert
-    pub(crate) fn backtrack<'me, K>(&'me mut self) -> InsertBacktrack<'me, 'txmanager, 'index, K>
-    where
-        K: Key,
-    {
-        InsertBacktrack {
-            builder: self,
-            backtrack: vec![],
-            new_root: None,
-            phantom_key: PhantomData,
-        }
-    }
-
-    pub(crate) fn delete_node(&mut self, id: PageId) {
-        self.old_ids.push(id);
-    }
-
-    pub(crate) fn add_new_node(
-        &mut self,
-        mem_page: crate::mem_page::MemPage,
-        key_buffer_size: u32,
-    ) -> PageId {
-        let id = self.page_manager.new_id();
-        let page = Page {
-            page_id: id,
-            mem_page,
-            key_buffer_size,
-        };
-
-        // TODO: handle this error
-        self.extra.insert(page.page_id, page);
-        id
-    }
-
-    pub(crate) fn current_root(&self) -> PageId {
-        self.current_root
-    }
-
-    pub(crate) fn mut_page(&mut self, id: PageId) -> Option<(Option<PageId>, Page)> {
-        match self.extra.remove(&id) {
-            Some(page) => Some((None, page)),
-            None => {
-                let page = match self.pages.get_page(id).map(|page| page.get_mut()) {
-                    Some(page) => page,
-                    None => return None,
-                };
-
-                let mut shadow = page;
-                let old_id = shadow.page_id;
-                shadow.page_id = self.page_manager.new_id();
-
-                Some((Some(old_id), shadow))
-            }
-        }
-    }
-
-    pub(crate) fn add_shadow(&mut self, old_id: PageId, shadow: Page) {
-        self.extra.insert(shadow.page_id, shadow);
-        self.old_ids.push(old_id);
-    }
-
-    pub(crate) fn has_next(&self) -> bool {
-        self.current.is_some()
-    }
-
-    /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
-    /// available to new readers
-    pub(crate) fn commit<K>(mut self)
-    where
-        K: Key,
-    {
-        let pages = self.pages;
-
-        for (_id, page) in self.extra.drain() {
-            pages.write_page(page).unwrap();
-        }
-
-        let transaction = WriteTransaction {
-            new_root: self.current_root,
-            shadowed_pages: self.old_ids,
-            // Pages allocated at the end, basically
-            next_page_id: self.page_manager.next_page(),
-        };
-
-        let mut current_version = self.current_version.write().unwrap();
-
-        self.versions.push_back(current_version.clone());
-
-        *current_version = Arc::new(Version {
-            root: self.current_root,
-            transaction,
-        });
-    }
-
-    // not really needed because the destructor has basically the same effect right now
-    pub(crate) fn abort(self) {
-        unimplemented!()
     }
 }
 
