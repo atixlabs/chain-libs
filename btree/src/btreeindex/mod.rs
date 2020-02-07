@@ -5,7 +5,10 @@ mod pages;
 #[allow(dead_code)]
 mod version_management;
 
-use version_management::transaction::{traits::ReadTransaction as _, PageHandle, ReadTransaction};
+use version_management::transaction::{
+    traits::{ReadTransaction as _, WriteTransaction as _},
+    InsertTransaction, PageHandle, ReadTransaction,
+};
 use version_management::*;
 
 use crate::mem_page::MemPage;
@@ -195,7 +198,7 @@ where
 
     fn insert<'a>(
         &self,
-        tx: &mut InsertTransactionBuilder<'a, 'a>,
+        tx: &mut InsertTransaction<'a>,
         key: K,
         value: Value,
     ) -> Result<(), BTreeStoreError> {
@@ -354,7 +357,7 @@ where
         &self,
         tx: &'a ReadTransaction,
         key: &K,
-    ) -> PageHandle<'a, transaction::markers::Immutable> {
+    ) -> PageHandle<'a, transaction::borrow::Immutable> {
         let mut current = tx.get_page(tx.root()).unwrap();
 
         let page_size = self.static_settings.page_size.try_into().unwrap();

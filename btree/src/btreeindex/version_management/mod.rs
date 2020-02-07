@@ -1,15 +1,19 @@
 pub mod transaction;
-use super::page_manager::PageManager;
-use transaction::ReadTransaction;
-
 use super::pages::*;
 use super::Metadata;
 use super::Node;
 use super::PageId;
+use crate::btreeindex::page_manager::PageManager;
 use crate::mem_page::MemPage;
 use crate::Key;
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use transaction::{
+    borrow::{Immutable, Mutable},
+    traits::{ReadTransaction as _, WriteTransaction as _},
+    InsertTransaction, PageHandle, ReadTransaction,
+};
 
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
@@ -39,23 +43,19 @@ pub(crate) struct Checkpoint<'a> {
 }
 
 impl Version {
-    pub(crate) fn root(&self) -> PageId {
+    pub fn root(&self) -> PageId {
         self.root
     }
 }
 
-pub(crate) enum WriteTransactionBuilder<'a, 'index> {
-    Insert(InsertTransactionBuilder<'a, 'index>),
-}
-
 /// this is basically a stack, but it will rename pointers and interact with the builder in order to reuse
 /// already cloned pages
-pub(crate) struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
+pub struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, K>
 where
     K: Key,
 {
-    builder: &'txbuilder mut InsertTransactionBuilder<'txmanager, 'index>,
-    backtrack: Vec<(Option<PageId>, Page)>,
+    builder: &'txbuilder mut transaction::InsertTransaction<'txmanager>,
+    backtrack: Vec<PageId>,
     new_root: Option<PageId>,
     phantom_key: PhantomData<[K]>,
 }
@@ -92,19 +92,21 @@ impl TransactionManager {
     pub fn insert_transaction<'me, 'index: 'me>(
         &'me self,
         pages: &'index Pages,
-    ) -> InsertTransactionBuilder<'me, 'me> {
+    ) -> InsertTransaction<'me> {
         let page_manager = self.page_manager.lock().unwrap();
         let versions = self.versions.lock().unwrap();
 
-        InsertTransactionBuilder {
+        InsertTransaction {
             current_root: self.latest_version().root(),
             extra: HashMap::new(),
             old_ids: vec![],
-            pages,
+            pages: pages.clone(),
             current: None,
             page_manager,
             versions,
             current_version: self.latest_version.clone(),
+            version: self.latest_version(),
+            borrowed: std::collections::HashSet::new(),
         }
     }
 
@@ -156,37 +158,41 @@ impl TransactionManager {
 }
 
 impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
-    InsertBacktrack<'txbuilder, 'txmanager, 'index, K>
+    InsertBacktrack<'txbuilder, 'txmanager, K>
 where
     K: Key,
 {
     pub(crate) fn search_for(&mut self, key: &K) {
-        let mut current = self.builder.current_root();
+        let mut current = self.builder.root();
 
         loop {
-            let (old_id, page) = self.builder.mut_page(current).unwrap();
+            let page = self.builder.get_page(current).unwrap();
 
-            let found_leaf = page.as_node(|node: Node<K, &[u8]>| {
-                if let Some(inode) = node.as_internal() {
-                    let upper_pivot = match inode.keys().binary_search(key) {
-                        Ok(pos) => Some(pos + 1),
-                        Err(pos) => Some(pos),
-                    }
-                    .filter(|pos| pos < &inode.children().len());
+            let found_leaf = page.as_node(
+                self.page_size,
+                self.key_buffer_size,
+                |node: Node<K, &[u8]>| {
+                    if let Some(inode) = node.as_internal() {
+                        let upper_pivot = match inode.keys().binary_search(key) {
+                            Ok(pos) => Some(pos + 1),
+                            Err(pos) => Some(pos),
+                        }
+                        .filter(|pos| pos < &inode.children().len());
 
-                    if let Some(upper_pivot) = upper_pivot {
-                        current = inode.children().get(upper_pivot).unwrap().clone();
+                        if let Some(upper_pivot) = upper_pivot {
+                            current = inode.children().get(upper_pivot).unwrap().clone();
+                        } else {
+                            let last = inode.children().len().checked_sub(1).unwrap();
+                            current = inode.children().get(last).unwrap().clone();
+                        }
+                        false
                     } else {
-                        let last = inode.children().len().checked_sub(1).unwrap();
-                        current = inode.children().get(last).unwrap().clone();
+                        true
                     }
-                    false
-                } else {
-                    true
-                }
-            });
+                },
+            );
 
-            self.backtrack.push((old_id, page));
+            self.backtrack.push(page);
 
             if found_leaf {
                 break;
@@ -194,27 +200,26 @@ where
         }
     }
 
-    pub(crate) fn get_next(&mut self) -> Option<&mut Page> {
-        let (old_id, last) = match self.backtrack.pop() {
-            Some(pair) => pair,
+    pub(crate) fn get_next(&mut self) -> Option<PageHandle<Mutable>> {
+        let id = match self.backtrack.pop() {
+            Some(id) => id,
             None => return None,
         };
-
-        let id = last.page_id;
 
         if self.backtrack.is_empty() {
             assert!(self.new_root.is_none());
             self.new_root = Some(id);
         }
 
-        if let Some(old_id) = old_id {
-            self.rename_parent(old_id, id);
-            self.builder.add_shadow(old_id, last);
-        } else {
-            self.builder.extra.insert(id, last);
-        }
+        let mut_page = self.builder.mut_page(id).unwrap();
 
-        self.builder.extra.get_mut(&id)
+        match mut_page {
+            transaction::MutPage::NeedsShadow { old_id, page } => {
+                self.rename_parent(old_id, id);
+                Some(page)
+            }
+            transaction::MutPage::AlreadyInTransaction(handle) => handle,
+        };
     }
 
     pub(crate) fn rename_parent(&mut self, old_id: PageId, new_id: PageId) {
@@ -252,13 +257,12 @@ where
     }
 }
 
-impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K> Drop
-    for InsertBacktrack<'txbuilder, 'txmanager, 'index, K>
+impl<'txbuilder, 'txmanager: 'txbuilder, K> Drop for InsertBacktrack<'txbuilder, 'txmanager, K>
 where
     K: Key,
 {
     fn drop(&mut self) {
-        while let Some(_) = InsertBacktrack::<'txbuilder, 'txmanager, 'index, K>::get_next(self) {
+        while let Some(_) = InsertBacktrack::<'txbuilder, 'txmanager, K>::get_next(self) {
             ()
         }
 

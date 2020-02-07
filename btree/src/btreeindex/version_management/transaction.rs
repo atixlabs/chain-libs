@@ -1,24 +1,28 @@
 use super::Version;
-use crate::btreeindex::{Node, Page, PageId, Pages};
+use crate::btreeindex::{page_manager::PageManager, Node, Page, PageId, Pages};
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc, MutexGuard, RwLock};
+use traits::ReadTransaction as _;
 
-pub mod markers {
-    pub enum Immutable {}
-    pub enum Mutable {}
+pub mod borrow {
+    use super::*;
+    pub struct Immutable {}
+    pub struct Mutable {
+        signal: Arc<AtomicBool>,
+    }
 }
 pub struct PageHandle<'a, Borrow> {
     id: PageId,
     raw_ptr: *mut u8,
     _lifetime_marker: PhantomData<&'a Page>,
-    _borrow_marker: PhantomData<Borrow>,
+    borrow: Borrow,
 }
 
-impl<'a> PageHandle<'a, markers::Immutable> {
+impl<'a> PageHandle<'a, borrow::Immutable> {
     pub fn as_node<K, R>(
         &self,
         page_size: usize,
@@ -32,18 +36,32 @@ impl<'a> PageHandle<'a, markers::Immutable> {
         let node = Node::<K, &[u8]>::from_raw(page.as_ref(), key_buffer_size);
         f(node)
     }
+
+    unsafe fn make_mut(self, signal: Arc<AtomicBool>) -> PageHandle<'a, borrow::Mutable> {
+        let PageHandle { id, raw_ptr, .. } = self;
+
+        PageHandle {
+            id,
+            raw_ptr,
+            _lifetime_marker: PhantomData,
+            borrow: borrow::Mutable { signal },
+        }
+    }
+}
+
+pub enum MutPage<'a> {
+    NeedsShadow {
+        old_id: PageId,
+        page: PageHandle<'a, borrow::Mutable>,
+    },
+    AlreadyInTransaction(PageHandle<'a, borrow::Mutable>),
 }
 
 pub mod traits {
     use super::*;
     pub trait ReadTransaction {
         fn root(&self) -> PageId;
-        fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, markers::Immutable>>;
-    }
-
-    pub enum MutPage {
-        NeedsShadow { old_id: PageId, page: Page },
-        AlreadyInTransaction(Page),
+        fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, borrow::Immutable>>;
     }
 
     pub trait WriteTransaction: ReadTransaction {
@@ -52,10 +70,6 @@ pub mod traits {
         fn mut_page(&mut self, id: PageId) -> Option<MutPage>;
 
         fn delete_node(&mut self, id: PageId);
-
-        fn add_shadow(&self, old_id: PageId, shadow: Page);
-
-        fn has_next(&self) -> bool;
 
         /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
         /// available to new readers
@@ -84,7 +98,7 @@ impl traits::ReadTransaction for ReadTransaction {
         self.version.root
     }
 
-    fn get_page(&self, id: PageId) -> Option<PageHandle<markers::Immutable>> {
+    fn get_page(&self, id: PageId) -> Option<PageHandle<borrow::Immutable>> {
         if let Some(page) = self.ownership.borrow_mut().get_mut(&id) {
             let id = page.id();
             let raw_ptr = page.mem_page.as_mut().as_mut_ptr();
@@ -92,7 +106,7 @@ impl traits::ReadTransaction for ReadTransaction {
                 id,
                 raw_ptr,
                 _lifetime_marker: PhantomData,
-                _borrow_marker: PhantomData,
+                borrow: borrow::Immutable,
             });
         }
 
@@ -112,40 +126,52 @@ impl traits::ReadTransaction for ReadTransaction {
 
 /// staging area for batched insertions, it will keep track of pages already shadowed and reuse them,
 /// it can be used to create a new `Version` at the end with all the insertions done atomically
-pub(crate) struct InsertTransaction<'index, 'locks: 'index> {
-    pages: &'index Pages,
-    current_root: PageId,
-    extra: HashMap<PageId, Page>,
-    old_ids: Vec<PageId>,
-    current: Option<usize>,
-    page_manager: MutexGuard<'locks, PageManager>,
-    versions: MutexGuard<'locks, VecDeque<Arc<Version>>>,
-    current_version: Arc<RwLock<Arc<Version>>>,
+pub(crate) struct InsertTransaction<'locks> {
+    pub current_root: PageId,
+    pub extra: HashMap<PageId, Page>,
+    pub old_ids: Vec<PageId>,
+    pub current: Option<usize>,
+    pub page_manager: MutexGuard<'locks, PageManager>,
+    pub versions: MutexGuard<'locks, VecDeque<Arc<Version>>>,
+    pub current_version: Arc<RwLock<Arc<Version>>>,
+    pub version: Arc<Version>,
+    pub pages: Pages,
+    borrowed: HashMap<PageId, Arc<()>>,
 }
 
-impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index> {
-    /// create a staging area for a single insert
-    pub(crate) fn backtrack<'me, K>(&'me mut self) -> InsertBacktrack<'me, 'txmanager, 'index, K>
-    where
-        K: Key,
-    {
-        InsertBacktrack {
-            builder: self,
-            backtrack: vec![],
-            new_root: None,
-            phantom_key: PhantomData,
+impl<'locks> traits::ReadTransaction for InsertTransaction<'locks> {
+    fn root(&self) -> PageId {
+        self.current_root
+    }
+
+    fn get_page(&self, id: PageId) -> Option<PageHandle<borrow::Immutable>> {
+        if let Some(page) = self.extra.get_mut(&id) {
+            let id = page.id();
+            let raw_ptr = page.mem_page.as_mut().as_mut_ptr();
+            return Some(PageHandle {
+                id,
+                raw_ptr,
+                _lifetime_marker: PhantomData,
+                borrow: Immutable,
+            });
+        }
+
+        let page = self.pages.get_page(id);
+
+        if let Some(page) = page {
+            {
+                let page = page.get_mut();
+                self.extra.insert(id, page);
+            }
+            self.get_page(id)
+        } else {
+            None
         }
     }
+}
 
-    pub(crate) fn delete_node(&mut self, id: PageId) {
-        self.old_ids.push(id);
-    }
-
-    pub(crate) fn add_new_node(
-        &mut self,
-        mem_page: crate::mem_page::MemPage,
-        key_buffer_size: u32,
-    ) -> PageId {
+impl<'locks> traits::WriteTransaction for InsertTransaction<'locks> {
+    fn add_new_node(&mut self, mem_page: crate::mem_page::MemPage, key_buffer_size: u32) -> PageId {
         let id = self.page_manager.new_id();
         let page = Page {
             page_id: id,
@@ -158,40 +184,39 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
         id
     }
 
-    pub(crate) fn current_root(&self) -> PageId {
-        self.current_root
-    }
-
-    pub(crate) fn mut_page(&mut self, id: PageId) -> Option<(Option<PageId>, Page)> {
-        match self.extra.remove(&id) {
-            Some(page) => Some((None, page)),
-            None => {
-                let page = match self.pages.get_page(id).map(|page| page.get_mut()) {
-                    Some(page) => page,
-                    None => return None,
-                };
-
-                let mut shadow = page;
-                let old_id = shadow.page_id;
-                shadow.page_id = self.page_manager.new_id();
-
-                Some((Some(old_id), shadow))
-            }
+    fn mut_page(&mut self, id: PageId) -> Option<MutPage> {
+        if self.borrowed.contains(&id) {
+            panic!("tried to borrow page mutably twice");
         }
+
+        let already_fetched = self.extra.contains_key(&id);
+
+        let handle = self
+            .get_page(id)
+            .map(|inmutable_handle| inmutable_handle.make_mut());
+
+        handle.map(|handle| {
+            if already_fetched {
+                MutPage::AlreadyInTransaction(handle)
+            } else {
+                let old_id = handle.id;
+                self.old_ids.push(old_id);
+                handle.id = self.page_manager.new_id();
+                MutPage::NeedsShadow {
+                    old_id,
+                    page: handle,
+                }
+            }
+        })
     }
 
-    pub(crate) fn add_shadow(&mut self, old_id: PageId, shadow: Page) {
-        self.extra.insert(shadow.page_id, shadow);
-        self.old_ids.push(old_id);
-    }
-
-    pub(crate) fn has_next(&self) -> bool {
-        self.current.is_some()
+    fn delete_node(&mut self, id: PageId) {
+        self.old_ids.push(id);
     }
 
     /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
     /// available to new readers
-    pub(crate) fn commit<K>(mut self)
+    fn commit<K>(mut self)
     where
         K: Key,
     {
@@ -201,7 +226,7 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
             pages.write_page(page).unwrap();
         }
 
-        let transaction = WriteTransaction {
+        let transaction = super::WriteTransaction {
             new_root: self.current_root,
             shadowed_pages: self.old_ids,
             // Pages allocated at the end, basically
@@ -217,10 +242,23 @@ impl<'txmanager, 'index: 'txmanager> InsertTransactionBuilder<'txmanager, 'index
             transaction,
         });
     }
-
-    // not really needed because the destructor has basically the same effect right now
-    pub(crate) fn abort(self) {
-        unimplemented!()
-    }
 }
 
+impl<'txmanager> InsertTransaction<'txmanager> {
+    /// create a staging area for a single insert
+    pub(crate) fn backtrack<'me, K>(&'me mut self) -> super::InsertBacktrack<'me, 'txmanager, K>
+    where
+        K: Key,
+    {
+        super::InsertBacktrack {
+            builder: self,
+            backtrack: vec![],
+            new_root: None,
+            phantom_key: PhantomData,
+        }
+    }
+
+    pub(crate) fn current_root(&self) -> PageId {
+        self.current_root
+    }
+}
