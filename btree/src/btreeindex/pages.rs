@@ -1,10 +1,12 @@
 use crate::btreeindex::node::Node;
 use crate::btreeindex::PageId;
-use crate::storage::{MmapStorage, Storage};
+use crate::storage::MmapStorage;
 use crate::Key;
 use crate::MemPage;
 use byteorder::{ByteOrder, LittleEndian};
+use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 /// An abstraction over a paged file, Pages is kind of an array but backed from disk. Page represents at the moment
@@ -12,7 +14,7 @@ use std::sync::{Arc, RwLock};
 /// when we move to mmap, this things may change to take advantage of zero copy.
 
 #[derive(Clone)]
-pub(crate) struct Pages {
+pub struct Pages {
     storage: Arc<RwLock<MmapStorage>>,
     page_size: u16,
     // TODO: we need to remove this from here
@@ -23,14 +25,14 @@ pub(crate) struct Pages {
 unsafe impl Send for Pages {}
 unsafe impl Sync for Pages {}
 
-pub(crate) struct PagesInitializationParams {
-    pub(crate) storage: MmapStorage,
-    pub(crate) page_size: u16,
-    pub(crate) key_buffer_size: u32,
+pub struct PagesInitializationParams {
+    pub storage: MmapStorage,
+    pub page_size: u16,
+    pub key_buffer_size: u32,
 }
 
 impl Pages {
-    pub(crate) fn new(params: PagesInitializationParams) -> Self {
+    pub fn new(params: PagesInitializationParams) -> Self {
         let PagesInitializationParams {
             storage,
             page_size,
@@ -46,53 +48,46 @@ impl Pages {
         }
     }
 
-    fn read_page(&self, id: PageId) -> MemPage {
-        let storage = self.storage.read().unwrap();
-        let buf = storage
-            .get(
-                u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
-                    * u64::from(self.page_size),
-                self.page_size.into(),
-            )
-            .unwrap();
-
-        let page_size = self.page_size.try_into().unwrap();
-        let mut page = MemPage::new(page_size);
-
-        // Ideally, we don't want to make any copies here, but that would require making the mmaped
-        // storage thread safe (specially if the mmap gets remapped)
-        page.as_mut().copy_from_slice(&buf[..page_size]);
-
-        page
-    }
-
-    pub(crate) fn write_page(&self, page: Page) -> Result<(), std::io::Error> {
-        let mem_page = &page.mem_page;
-        let page_id = page.page_id;
-
+    pub fn mut_page(&self, id: PageId) -> PageHandle<borrow::Mutable> {
         let mut storage = self.storage.write().unwrap();
+        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
+            * u64::from(self.page_size);
 
-        storage
-            .put(
-                u64::from(page_id.checked_sub(1).unwrap()) * u64::try_from(mem_page.len()).unwrap(),
-                &mem_page.as_ref(),
-            )
-            .unwrap();
+        let page = match storage.get_mut(from, self.page_size.into()) {
+            Ok(page) => page,
+            Err(_) => unimplemented!(),
+        };
 
-        Ok(())
+        let handle = PageHandle {
+            id,
+            _lifetime_marker: PhantomData,
+            borrow: borrow::Mutable {
+                raw_ptr: page.as_mut().as_mut_ptr(),
+            },
+        };
+
+        handle
     }
 
-    pub(crate) fn get_page<'a>(&'a self, id: PageId) -> Option<PageRef> {
+    pub fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<borrow::Immutable>> {
         // TODO: Check the id is in range?
-        let page = self.read_page(id);
+        let storage = self.storage.read().unwrap();
+        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
+            * u64::from(self.page_size);
 
-        let page_ref = PageRef::new(Page {
-            page_id: id,
-            key_buffer_size: self.key_buffer_size,
-            mem_page: page,
-        });
+        let page = storage
+            .get(from, self.page_size.into())
+            .expect("page not in range");
 
-        Some(page_ref.clone())
+        let handle = PageHandle {
+            id,
+            _lifetime_marker: PhantomData,
+            borrow: borrow::Immutable {
+                raw_ptr: page.as_ref().as_ptr(),
+            },
+        };
+
+        Some(handle)
     }
 
     pub(crate) fn sync_file(&self) -> Result<(), std::io::Error> {
@@ -103,73 +98,68 @@ impl Pages {
     }
 }
 
-use std::fmt;
-impl fmt::Debug for Page {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tag = LittleEndian::read_u64(&self.mem_page.as_ref()[0..8]);
-        write!(f, "Page {{ page_id: {}, tag: {} }}", self.page_id, tag)
+pub mod borrow {
+    use super::*;
+    pub struct Immutable {
+        pub raw_ptr: *const u8,
+    }
+    pub struct Mutable {
+        pub raw_ptr: *mut u8,
     }
 }
 
-pub struct Page {
-    pub page_id: PageId,
-    pub key_buffer_size: u32,
-    pub mem_page: MemPage,
+pub struct PageHandle<'a, Borrow> {
+    id: PageId,
+    _lifetime_marker: PhantomData<&'a [u8]>,
+    borrow: Borrow,
 }
 
-#[derive(Clone)]
-pub(crate) struct PageRef(Arc<Page>);
-
-unsafe impl Send for PageRef {}
-unsafe impl Sync for PageRef {}
-
-impl std::ops::Deref for PageRef {
-    type Target = Arc<Page>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Page {
-    pub(crate) fn as_node<K, R>(&self, f: impl FnOnce(Node<K, &[u8]>) -> R) -> R
+impl<'a> PageHandle<'a, borrow::Immutable> {
+    pub fn as_node<K, R>(
+        &self,
+        page_size: usize,
+        key_buffer_size: usize,
+        f: impl FnOnce(Node<K, &[u8]>) -> R,
+    ) -> R
     where
         K: Key,
     {
-        let page: &[u8] = self.mem_page.as_ref();
-        let node =
-            Node::<K, &[u8]>::from_raw(page.as_ref(), self.key_buffer_size.try_into().unwrap());
+        let page: &'a [u8] = unsafe { std::slice::from_raw_parts(self.borrow.raw_ptr, page_size) };
+        let node = Node::<K, &[u8]>::from_raw(page.as_ref(), key_buffer_size);
         f(node)
     }
 
-    pub(crate) fn as_node_mut<K, R>(&mut self, f: impl FnOnce(Node<K, &mut [u8]>) -> R) -> R
-    where
-        K: Key,
-    {
-        let page = self.mem_page.as_mut();
-        let node = Node::<K, &mut [u8]>::from_raw_mut(
-            page.as_mut(),
-            self.key_buffer_size.try_into().unwrap(),
-        );
-        f(node)
-    }
+    unsafe fn make_mut(self) -> PageHandle<'a, borrow::Mutable> {
+        let PageHandle { id, borrow, .. } = self;
 
-    pub(crate) fn id(&self) -> PageId {
-        self.page_id
-    }
-}
-
-impl PageRef {
-    pub(crate) fn new(page: Page) -> Self {
-        PageRef(Arc::new(page))
-    }
-
-    pub(crate) fn get_mut(&self) -> Page {
-        let page = &self.0;
-        Page {
-            page_id: page.page_id,
-            key_buffer_size: page.key_buffer_size,
-            mem_page: page.mem_page.clone(),
+        PageHandle {
+            id,
+            _lifetime_marker: PhantomData,
+            borrow: borrow::Mutable {
+                raw_ptr: borrow.raw_ptr as *mut u8,
+            },
         }
+    }
+}
+
+impl<'a> PageHandle<'a, borrow::Mutable> {
+    pub fn as_node_mut<K, R>(
+        &self,
+        page_size: usize,
+        key_buffer_size: usize,
+        f: impl FnOnce(Node<K, &mut [u8]>) -> R,
+    ) -> R
+    where
+        K: Key,
+    {
+        let page: &'a mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(self.borrow.raw_ptr, page_size) };
+        let node = Node::<K, &mut [u8]>::from_raw(page.as_mut(), key_buffer_size);
+        f(node)
+    }
+
+    pub fn id(&self) -> PageId {
+        self.id
     }
 }
 

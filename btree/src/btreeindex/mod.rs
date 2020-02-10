@@ -7,7 +7,7 @@ mod version_management;
 
 use version_management::transaction::{
     traits::{ReadTransaction as _, WriteTransaction as _},
-    InsertTransaction, PageHandle, ReadTransaction,
+    InsertTransaction, ReadTransaction,
 };
 use version_management::*;
 
@@ -15,7 +15,7 @@ use crate::mem_page::MemPage;
 use crate::BTreeStoreError;
 use metadata::{Metadata, StaticSettings};
 use node::{InternalInsertStatus, LeafInsertStatus, Node};
-use pages::*;
+use pages::{borrow, PageHandle, Pages, PagesInitializationParams};
 use std::borrow::Borrow;
 
 use crate::{Key, Value};
@@ -76,13 +76,14 @@ where
 
         let first_page_id = metadata.page_manager.new_id();
 
-        pages
-            .write_page(Page {
-                page_id: first_page_id,
-                key_buffer_size,
-                mem_page: root_page,
-            })
-            .expect("Couldn't write first page");
+        unimplemented!();
+        // pages
+        //     .write_page(Page {
+        //         page_id: first_page_id,
+        //         key_buffer_size,
+        //         mem_page: root_page,
+        //     })
+        //     .expect("Couldn't write first page");
 
         metadata.set_root(first_page_id);
 
@@ -207,8 +208,9 @@ where
 
         let needs_recurse = {
             let leaf = backtrack.get_next().unwrap();
+            let leaf_id = leaf.id();
             self.insert_in_leaf(leaf, key, value)?
-                .map(|(split_key, new_node)| (leaf.id(), split_key, new_node))
+                .map(|(split_key, new_node)| (leaf_id, split_key, new_node))
         };
 
         if let Some((leaf_id, split_key, new_node)) = needs_recurse {
@@ -228,7 +230,7 @@ where
 
     pub(crate) fn insert_in_leaf<'a>(
         &self,
-        leaf: &mut Page,
+        leaf: PageHandle<borrow::Mutable>,
         key: K,
         value: Value,
     ) -> Result<Option<(K, Node<K, MemPage>)>, BTreeStoreError> {
@@ -240,11 +242,12 @@ where
                 Node::<K, MemPage>::new_leaf(key_size, uninit)
             };
 
-            let insert_status = leaf.as_node_mut(move |mut node: Node<K, &mut [u8]>| {
-                node.as_leaf_mut()
-                    .unwrap()
-                    .insert(key, value, &mut allocate)
-            });
+            let insert_status =
+                leaf.as_node_mut(page_size, key_size, move |mut node: Node<K, &mut [u8]>| {
+                    node.as_leaf_mut()
+                        .unwrap()
+                        .insert(key, value, &mut allocate)
+                });
 
             match insert_status {
                 LeafInsertStatus::Ok => None,
@@ -272,12 +275,13 @@ where
                 let node = backtrack.get_next().unwrap();
                 let node_id = node.id();
                 let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
+                let page_size = self.static_settings.page_size.try_into().unwrap();
                 let mut allocate = || {
-                    let uninit = MemPage::new(self.static_settings.page_size.try_into().unwrap());
+                    let uninit = MemPage::new(page_size);
                     Node::new_internal(key_size, uninit)
                 };
 
-                match node.as_node_mut(|mut node| {
+                match node.as_node_mut(page_size, key_size, |mut node| {
                     node.as_internal_mut()
                         .unwrap()
                         .insert(split_key, right_id, &mut allocate)
@@ -353,11 +357,7 @@ where
         )
     }
 
-    fn search<'a>(
-        &self,
-        tx: &'a ReadTransaction,
-        key: &K,
-    ) -> PageHandle<'a, transaction::borrow::Immutable> {
+    fn search<'a>(&self, tx: &'a ReadTransaction, key: &K) -> PageHandle<'a, borrow::Immutable> {
         let mut current = tx.get_page(tx.root()).unwrap();
 
         let page_size = self.static_settings.page_size.try_into().unwrap();
@@ -446,27 +446,33 @@ mod tests {
                 if n == root_id {
                     println!("ROOT");
                 }
-                page_ref.as_node(|node: Node<K, &[u8]>| match node.get_tag() {
-                    node::NodeTag::Internal => {
-                        println!("Internal Node");
-                        println!("keys: ");
-                        for k in node.as_internal().unwrap().keys().into_iter() {
-                            println!("{:?}", k.borrow());
+
+                let page_size = self.page_size().try_into().unwrap();
+                let key_size = self.key_buffer_size().try_into().unwrap();
+
+                page_ref.as_node(page_size, key_size, |node: Node<K, &[u8]>| {
+                    match node.get_tag() {
+                        node::NodeTag::Internal => {
+                            println!("Internal Node");
+                            println!("keys: ");
+                            for k in node.as_internal().unwrap().keys().into_iter() {
+                                println!("{:?}", k.borrow());
+                            }
+                            println!("children: ");
+                            for c in node.as_internal().unwrap().children().into_iter() {
+                                println!("{:?}", c.borrow());
+                            }
                         }
-                        println!("children: ");
-                        for c in node.as_internal().unwrap().children().into_iter() {
-                            println!("{:?}", c.borrow());
-                        }
-                    }
-                    node::NodeTag::Leaf => {
-                        println!("Leaf Node");
-                        println!("keys: ");
-                        for k in node.as_leaf().unwrap().keys().into_iter() {
-                            println!("{:?}", k.borrow());
-                        }
-                        println!("values: ");
-                        for v in node.as_leaf().unwrap().values().into_iter() {
-                            println!("{:?}", v.borrow());
+                        node::NodeTag::Leaf => {
+                            println!("Leaf Node");
+                            println!("keys: ");
+                            for k in node.as_leaf().unwrap().keys().into_iter() {
+                                println!("{:?}", k.borrow());
+                            }
+                            println!("values: ");
+                            for v in node.as_leaf().unwrap().values().into_iter() {
+                                println!("{:?}", v.borrow());
+                            }
                         }
                     }
                 });

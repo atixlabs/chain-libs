@@ -4,15 +4,18 @@ use super::Metadata;
 use super::Node;
 use super::PageId;
 use crate::btreeindex::page_manager::PageManager;
+use crate::btreeindex::pages::{
+    borrow::{Immutable, Mutable},
+    PageHandle,
+};
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use transaction::{
-    borrow::{Immutable, Mutable},
     traits::{ReadTransaction as _, WriteTransaction as _},
-    InsertTransaction, PageHandle, ReadTransaction,
+    InsertTransaction, ReadTransaction,
 };
 
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -106,7 +109,6 @@ impl TransactionManager {
             versions,
             current_version: self.latest_version.clone(),
             version: self.latest_version(),
-            borrowed: std::collections::HashSet::new(),
         }
     }
 
@@ -163,80 +165,82 @@ where
     K: Key,
 {
     pub(crate) fn search_for(&mut self, key: &K) {
-        let mut current = self.builder.root();
+        // let mut current = self.builder.root();
 
-        loop {
-            let page = self.builder.get_page(current).unwrap();
+        // loop {
+        //     let page = self.builder.get_page(current).unwrap();
 
-            let found_leaf = page.as_node(
-                self.page_size,
-                self.key_buffer_size,
-                |node: Node<K, &[u8]>| {
-                    if let Some(inode) = node.as_internal() {
-                        let upper_pivot = match inode.keys().binary_search(key) {
-                            Ok(pos) => Some(pos + 1),
-                            Err(pos) => Some(pos),
-                        }
-                        .filter(|pos| pos < &inode.children().len());
+        //     let found_leaf = page.as_node(
+        //         self.page_size,
+        //         self.key_buffer_size,
+        //         |node: Node<K, &[u8]>| {
+        //             if let Some(inode) = node.as_internal() {
+        //                 let upper_pivot = match inode.keys().binary_search(key) {
+        //                     Ok(pos) => Some(pos + 1),
+        //                     Err(pos) => Some(pos),
+        //                 }
+        //                 .filter(|pos| pos < &inode.children().len());
 
-                        if let Some(upper_pivot) = upper_pivot {
-                            current = inode.children().get(upper_pivot).unwrap().clone();
-                        } else {
-                            let last = inode.children().len().checked_sub(1).unwrap();
-                            current = inode.children().get(last).unwrap().clone();
-                        }
-                        false
-                    } else {
-                        true
-                    }
-                },
-            );
+        //                 if let Some(upper_pivot) = upper_pivot {
+        //                     current = inode.children().get(upper_pivot).unwrap().clone();
+        //                 } else {
+        //                     let last = inode.children().len().checked_sub(1).unwrap();
+        //                     current = inode.children().get(last).unwrap().clone();
+        //                 }
+        //                 false
+        //             } else {
+        //                 true
+        //             }
+        //         },
+        //     );
 
-            self.backtrack.push(page);
+        //     self.backtrack.push(page);
 
-            if found_leaf {
-                break;
-            }
-        }
+        //     if found_leaf {
+        //         break;
+        //     }
+        // }
     }
 
     pub(crate) fn get_next(&mut self) -> Option<PageHandle<Mutable>> {
-        let id = match self.backtrack.pop() {
-            Some(id) => id,
-            None => return None,
-        };
+        // let id = match self.backtrack.pop() {
+        //     Some(id) => id,
+        //     None => return None,
+        // };
 
-        if self.backtrack.is_empty() {
-            assert!(self.new_root.is_none());
-            self.new_root = Some(id);
-        }
+        // if self.backtrack.is_empty() {
+        //     assert!(self.new_root.is_none());
+        //     self.new_root = Some(id);
+        // }
 
-        let mut_page = self.builder.mut_page(id).unwrap();
+        // let mut_page = self.builder.mut_page(id).unwrap();
 
-        match mut_page {
-            transaction::MutPage::NeedsShadow { old_id, page } => {
-                self.rename_parent(old_id, id);
-                Some(page)
-            }
-            transaction::MutPage::AlreadyInTransaction(handle) => handle,
-        };
+        // match mut_page {
+        //     transaction::MutPage::NeedsShadow { old_id, page } => {
+        //         self.rename_parent(old_id, id);
+        //         Some(page)
+        //     }
+        //     transaction::MutPage::AlreadyInTransaction(handle) => handle,
+        // };
+        unimplemented!()
     }
 
     pub(crate) fn rename_parent(&mut self, old_id: PageId, new_id: PageId) {
-        let parent = match self.backtrack.last_mut() {
-            Some((_, parent)) => parent,
-            None => return,
-        };
+        // let parent = match self.backtrack.last_mut() {
+        //     Some((_, parent)) => parent,
+        //     None => return,
+        // };
 
-        parent.as_node_mut(|mut node: Node<K, &mut [u8]>| {
-            let mut node = node.as_internal_mut().unwrap();
-            let pos_to_update = match node.children().linear_search(&old_id) {
-                Some(pos) => pos,
-                None => unreachable!(),
-            };
+        // parent.as_node_mut(|mut node: Node<K, &mut [u8]>| {
+        //     let mut node = node.as_internal_mut().unwrap();
+        //     let pos_to_update = match node.children().linear_search(&old_id) {
+        //         Some(pos) => pos,
+        //         None => unreachable!(),
+        //     };
 
-            node.children_mut().update(pos_to_update, &new_id).unwrap();
-        });
+        //     node.children_mut().update(pos_to_update, &new_id).unwrap();
+        // });
+        unimplemented!()
     }
 
     pub(crate) fn has_next(&self) -> bool {
