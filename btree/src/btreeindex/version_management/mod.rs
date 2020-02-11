@@ -88,22 +88,22 @@ impl TransactionManager {
         self.latest_version.read().unwrap().clone()
     }
 
-    pub fn read_transaction(&self, pages: Pages) -> ReadTransaction {
+    pub fn read_transaction(&self, pages: Arc<RwLock<Pages>>) -> ReadTransaction {
         ReadTransaction::new(self.latest_version(), pages)
     }
 
     pub fn insert_transaction<'me, 'index: 'me>(
         &'me self,
-        pages: &'index Pages,
+        pages: Arc<RwLock<Pages>>,
     ) -> InsertTransaction<'me> {
         let page_manager = self.page_manager.lock().unwrap();
         let versions = self.versions.lock().unwrap();
 
         InsertTransaction {
             current_root: self.latest_version().root(),
-            extra: HashMap::new(),
+            shadows: HashMap::new(),
             old_ids: vec![],
-            pages: pages.clone(),
+            pages,
             current: None,
             page_manager,
             versions,

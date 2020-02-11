@@ -25,7 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 pub type PageId = u32;
 
@@ -34,7 +34,7 @@ pub struct BTree<K> {
     // this is, the root node, and the list of free pages
     metadata: Mutex<(Metadata, File)>,
     static_settings: StaticSettings,
-    pages: Pages,
+    pages: Arc<RwLock<Pages>>,
     transaction_manager: TransactionManager,
     phantom_keys: PhantomData<[K]>,
 }
@@ -68,11 +68,11 @@ where
 
         let pages_storage = crate::storage::MmapStorage::new(tree_file)?;
 
-        let pages = Pages::new(PagesInitializationParams {
+        let pages = Arc::new(RwLock::new(Pages::new(PagesInitializationParams {
             storage: pages_storage,
             page_size: page_size.try_into().unwrap(),
             key_buffer_size,
-        });
+        })));
 
         let first_page_id = metadata.page_manager.new_id();
 
@@ -127,11 +127,11 @@ where
 
         let static_settings = StaticSettings::read(&mut static_settings_file)?;
 
-        let pages = Pages::new(PagesInitializationParams {
+        let pages = Arc::new(RwLock::new(Pages::new(PagesInitializationParams {
             storage: pages_storage,
             page_size: static_settings.page_size,
             key_buffer_size: static_settings.key_buffer_size,
-        });
+        })));
 
         let transaction_manager = TransactionManager::new(&metadata);
 
@@ -149,7 +149,7 @@ where
         if let Some(checkpoint) = self.transaction_manager.collect_pending() {
             let new_metadata = checkpoint.new_metadata;
 
-            self.pages.sync_file()?;
+            self.pages.read().unwrap().sync_file()?;
 
             let mut guard = self.metadata.lock().unwrap();
             let (_metadata, metadata_file) = &mut *guard;
@@ -166,7 +166,9 @@ where
     }
 
     pub fn insert_async(&self, key: K, value: Value) -> Result<(), BTreeStoreError> {
-        let mut tx = self.transaction_manager.insert_transaction(&self.pages);
+        let mut tx = self
+            .transaction_manager
+            .insert_transaction(self.pages.clone());
         self.insert(&mut tx, key, value)?;
 
         tx.commit::<K>();
@@ -186,7 +188,9 @@ where
         &self,
         iter: impl IntoIterator<Item = (K, Value)>,
     ) -> Result<(), BTreeStoreError> {
-        let mut tx = self.transaction_manager.insert_transaction(&self.pages);
+        let mut tx = self
+            .transaction_manager
+            .insert_transaction(self.pages.clone());
 
         for (key, value) in iter {
             self.insert(&mut tx, key, value)?;
@@ -242,12 +246,15 @@ where
                 Node::<K, MemPage>::new_leaf(key_size, uninit)
             };
 
-            let insert_status =
-                leaf.as_node_mut(page_size, key_size, move |mut node: Node<K, &mut [u8]>| {
+            let insert_status = leaf.as_node_mut(
+                page_size.try_into().unwrap(),
+                key_size,
+                move |mut node: Node<K, &mut [u8]>| {
                     node.as_leaf_mut()
                         .unwrap()
                         .insert(key, value, &mut allocate)
-                });
+                },
+            );
 
             match insert_status {
                 LeafInsertStatus::Ok => None,
@@ -281,7 +288,7 @@ where
                     Node::new_internal(key_size, uninit)
                 };
 
-                match node.as_node_mut(page_size, key_size, |mut node| {
+                match node.as_node_mut(page_size.try_into().unwrap(), key_size, |mut node| {
                     node.as_internal_mut()
                         .unwrap()
                         .insert(split_key, right_id, &mut allocate)
@@ -357,7 +364,7 @@ where
         )
     }
 
-    fn search<'a>(&self, tx: &'a ReadTransaction, key: &K) -> PageHandle<'a, borrow::Immutable> {
+    fn search<'a>(&'a self, tx: &'a ReadTransaction, key: &K) -> PageHandle<'a, borrow::Immutable> {
         let mut current = tx.get_page(tx.root()).unwrap();
 
         let page_size = self.static_settings.page_size.try_into().unwrap();
@@ -404,7 +411,11 @@ impl<K> Drop for BTree<K> {
         metadata_file.seek(SeekFrom::Start(0)).unwrap();
         metadata.write(metadata_file).unwrap();
 
-        self.pages.sync_file().expect("tree file sync failed");
+        self.pages
+            .into_inner()
+            .unwrap()
+            .sync_file()
+            .expect("tree file sync failed");
     }
 }
 

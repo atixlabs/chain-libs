@@ -24,13 +24,13 @@ pub mod traits {
     use super::*;
     pub trait ReadTransaction {
         fn root(&self) -> PageId;
-        fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, Immutable>>;
+        fn get_page(&self, id: PageId) -> Option<PageHandle<Immutable>>;
     }
 
     pub trait WriteTransaction: ReadTransaction {
         fn add_new_node(&mut self, mem_page: MemPage, key_buffer_size: u32) -> PageId;
 
-        fn mut_page(&mut self, id: PageId) -> Option<MutPage>;
+        fn mut_page(&mut self, id: PageId) -> MutPage;
 
         fn delete_node(&mut self, id: PageId);
 
@@ -42,11 +42,11 @@ pub mod traits {
 
 pub struct ReadTransaction {
     version: Arc<Version>,
-    pages: Pages,
+    pages: Arc<RwLock<Pages>>,
 }
 
 impl ReadTransaction {
-    pub(super) fn new(version: Arc<Version>, pages: Pages) -> Self {
+    pub(super) fn new(version: Arc<Version>, pages: Arc<RwLock<Pages>>) -> Self {
         ReadTransaction { version, pages }
     }
 }
@@ -57,29 +57,8 @@ impl traits::ReadTransaction for ReadTransaction {
     }
 
     fn get_page(&self, id: PageId) -> Option<PageHandle<Immutable>> {
-        // if let Some(page) = self.ownership.borrow_mut().get_mut(&id) {
-        //     let id = page.id();
-        //     let raw_ptr = page.mem_page.as_mut().as_mut_ptr();
-        //     return Some(PageHandle {
-        //         id,
-        //         raw_ptr,
-        //         _lifetime_marker: PhantomData,
-        //         borrow: Immutable {},
-        //     });
-        // }
-
-        let page = self.pages.get_page(id);
-
-        // if let Some(page) = page {
-        //     {
-        //         let page = page.get_mut();
-        //         self.ownership.borrow_mut().insert(id, page);
-        //     }
-        //     self.get_page(id)
-        // } else {
-        //     None
-        // }
-        unimplemented!()
+        let pages = self.pages.read().unwrap();
+        pages.get_page(id)
     }
 }
 
@@ -87,14 +66,14 @@ impl traits::ReadTransaction for ReadTransaction {
 /// it can be used to create a new `Version` at the end with all the insertions done atomically
 pub(crate) struct InsertTransaction<'locks> {
     pub current_root: PageId,
-    pub extra: HashMap<PageId, ()>,
+    pub shadows: HashMap<PageId, PageId>,
     pub old_ids: Vec<PageId>,
     pub current: Option<usize>,
     pub page_manager: MutexGuard<'locks, PageManager>,
+    pub pages: Arc<RwLock<Pages>>,
     pub versions: MutexGuard<'locks, VecDeque<Arc<Version>>>,
     pub current_version: Arc<RwLock<Arc<Version>>>,
     pub version: Arc<Version>,
-    pub pages: Pages,
 }
 
 impl<'locks> traits::ReadTransaction for InsertTransaction<'locks> {
@@ -103,68 +82,56 @@ impl<'locks> traits::ReadTransaction for InsertTransaction<'locks> {
     }
 
     fn get_page(&self, id: PageId) -> Option<PageHandle<Immutable>> {
-        unimplemented!()
-        // if let Some(page) = self.extra.get_mut(&id) {
-        //     let id = page.id();
-        //     let raw_ptr = page.mem_page.as_mut().as_mut_ptr();
-        //     return Some(PageHandle {
-        //         id,
-        //         raw_ptr,
-        //         _lifetime_marker: PhantomData,
-        //         borrow: Immutable {},
-        //     });
-        // }
-
-        // let page = self.pages.get_page(id);
-
-        // if let Some(page) = page {
-        //     {
-        //         let page = page.get_mut();
-        //         self.extra.insert(id, page);
-        //     }
-        //     self.get_page(id)
-        // } else {
-        //     None
-        // }
+        // TODO: this should return from extra
+        self.pages.read().unwrap().get_page(id)
     }
 }
 
 impl<'locks> traits::WriteTransaction for InsertTransaction<'locks> {
     fn add_new_node(&mut self, mem_page: crate::mem_page::MemPage, key_buffer_size: u32) -> PageId {
-        unimplemented!()
-        // let id = self.page_manager.new_id();
-        // let page = Page {
-        //     page_id: id,
-        //     mem_page,
-        //     key_buffer_size,
-        // };
+        let id = self.page_manager.new_id();
 
-        // // TODO: handle this error
-        // self.extra.insert(page.page_id, page);
-        // id
+        let pages = self.pages.read().unwrap();
+
+        pages.mut_page(id).unwrap().as_slice(|page| {
+            page.copy_from_slice(mem_page.as_ref());
+        });
+
+        id
     }
 
-    fn mut_page(&mut self, id: PageId) -> Option<MutPage> {
-        let already_fetched = self.extra.contains_key(&id);
+    fn mut_page(&mut self, id: PageId) -> MutPage {
+        let new_id = self.shadows.get(&id);
 
-        // let handle = self
-        //     .get_page(id)
-        //     .map(|inmutable_handle| inmutable_handle.make_mut());
+        if let Some(shadow_id) = new_id {
+            // we need a mapping from old_ids -> new_ids
+            let pages = self.pages.read().unwrap();
+            let handle = pages
+                .mut_page(*shadow_id)
+                .expect("already fetched transaction was not allocated");
 
-        // handle.map(|handle| {
-        //     if already_fetched {
-        //         MutPage::AlreadyInTransaction(handle)
-        //     } else {
-        //         let old_id = handle.id;
-        //         self.old_ids.push(old_id);
-        //         handle.id = self.page_manager.new_id();
-        //         MutPage::NeedsShadow {
-        //             old_id,
-        //             page: handle,
-        //         }
-        //     }
-        // })
-        unimplemented!()
+            MutPage::AlreadyInTransaction(handle)
+        } else {
+            let pages = self.pages.read().unwrap();
+            let old_id = id;
+            self.old_ids.push(old_id);
+            let new_id = self.page_manager.new_id();
+
+            let result = pages.make_shadow(old_id, new_id);
+
+            match result {
+                Ok(()) => (),
+                Err(()) => unimplemented!("resize storage"),
+            };
+
+            // infallible
+            let handle = pages.mut_page(new_id).unwrap();
+
+            MutPage::NeedsShadow {
+                old_id,
+                page: handle,
+            }
+        }
     }
 
     fn delete_node(&mut self, id: PageId) {
@@ -177,28 +144,21 @@ impl<'locks> traits::WriteTransaction for InsertTransaction<'locks> {
     where
         K: Key,
     {
-        unimplemented!()
-        // let pages = self.pages;
+        let transaction = super::WriteTransaction {
+            new_root: self.current_root,
+            shadowed_pages: self.old_ids,
+            // Pages allocated at the end, basically
+            next_page_id: self.page_manager.next_page(),
+        };
 
-        // for (_id, page) in self.extra.drain() {
-        //     pages.write_page(page).unwrap();
-        // }
+        let mut current_version = self.current_version.write().unwrap();
 
-        // let transaction = super::WriteTransaction {
-        //     new_root: self.current_root,
-        //     shadowed_pages: self.old_ids,
-        //     // Pages allocated at the end, basically
-        //     next_page_id: self.page_manager.next_page(),
-        // };
+        self.versions.push_back(current_version.clone());
 
-        // let mut current_version = self.current_version.write().unwrap();
-
-        // self.versions.push_back(current_version.clone());
-
-        // *current_version = Arc::new(Version {
-        //     root: self.current_root,
-        //     transaction,
-        // });
+        *current_version = Arc::new(Version {
+            root: self.current_root,
+            transaction,
+        });
     }
 }
 

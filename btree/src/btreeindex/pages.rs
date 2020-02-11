@@ -48,46 +48,42 @@ impl Pages {
         }
     }
 
-    pub fn mut_page(&self, id: PageId) -> PageHandle<borrow::Mutable> {
-        let mut storage = self.storage.write().unwrap();
-        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
-            * u64::from(self.page_size);
-
-        let page = match storage.get_mut(from, self.page_size.into()) {
-            Ok(page) => page,
-            Err(_) => unimplemented!(),
-        };
-
-        let handle = PageHandle {
-            id,
-            _lifetime_marker: PhantomData,
-            borrow: borrow::Mutable {
-                raw_ptr: page.as_mut().as_mut_ptr(),
-            },
-        };
-
-        handle
-    }
-
-    pub fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<borrow::Immutable>> {
-        // TODO: Check the id is in range?
-        let storage = self.storage.read().unwrap();
-        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
-            * u64::from(self.page_size);
-
-        let page = storage
-            .get(from, self.page_size.into())
-            .expect("page not in range");
-
-        let handle = PageHandle {
-            id,
-            _lifetime_marker: PhantomData,
-            borrow: borrow::Immutable {
-                raw_ptr: page.as_ref().as_ptr(),
-            },
-        };
+    pub fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, borrow::Immutable>> {
+        // TODO: Check the page is actually in range
+        // TODO: check mutable aliasing
+        let handle = PageHandle::new(id, &self.storage, u64::from(self.page_size));
 
         Some(handle)
+    }
+
+    pub fn mut_page<'a>(&'a self, id: PageId) -> Result<PageHandle<'a, borrow::Mutable>, ()> {
+        // TODO: add checks so the same page is not mutated more than once
+        let mut storage = self.storage.read().unwrap();
+        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
+            * u64::from(self.page_size);
+
+        // Make sure there is a mapped area for this page
+        match unsafe { storage.get_mut(from, from + u64::from(self.page_size)) } {
+            Ok(page) => Ok(PageHandle::new(
+                id,
+                &self.storage,
+                u64::from(self.page_size),
+            )),
+            Err(_) => Err(()),
+        }
+    }
+
+    pub fn make_shadow(&self, old_id: PageId, new_id: PageId) -> Result<(), ()> {
+        unimplemented!()
+    }
+
+    pub fn extend(&mut self, to: PageId) -> Result<(), std::io::Error> {
+        let mut storage = self.storage.write().unwrap();
+
+        let from = u64::from(to.checked_sub(1).expect("0 page is used as a null ptr"))
+            * u64::from(self.page_size);
+
+        storage.resize(from + u64::from(self.page_size))
     }
 
     pub(crate) fn sync_file(&self) -> Result<(), std::io::Error> {
@@ -100,66 +96,91 @@ impl Pages {
 
 pub mod borrow {
     use super::*;
-    pub struct Immutable {
-        pub raw_ptr: *const u8,
-    }
-    pub struct Mutable {
-        pub raw_ptr: *mut u8,
-    }
+    pub enum Immutable {}
+    pub enum Mutable {}
 }
 
 pub struct PageHandle<'a, Borrow> {
     id: PageId,
-    _lifetime_marker: PhantomData<&'a [u8]>,
-    borrow: Borrow,
+    storage: &'a RwLock<MmapStorage>,
+    borrow_marker: PhantomData<Borrow>,
+    page_size: u64,
+}
+
+impl<'a, T> PageHandle<'a, T> {
+    fn new(id: PageId, storage: &'a RwLock<MmapStorage>, page_size: u64) -> Self {
+        PageHandle {
+            id,
+            storage,
+            borrow_marker: PhantomData,
+            page_size,
+        }
+    }
+
+    fn fetch_from(&self) -> u64 {
+        u64::from(
+            self.id
+                .checked_sub(1)
+                .expect("0 page is used as a null ptr"),
+        ) * u64::from(self.page_size)
+    }
+
+    pub fn id(&self) -> PageId {
+        self.id
+    }
 }
 
 impl<'a> PageHandle<'a, borrow::Immutable> {
     pub fn as_node<K, R>(
         &self,
-        page_size: usize,
+        page_size: u64,
         key_buffer_size: usize,
         f: impl FnOnce(Node<K, &[u8]>) -> R,
     ) -> R
     where
         K: Key,
     {
-        let page: &'a [u8] = unsafe { std::slice::from_raw_parts(self.borrow.raw_ptr, page_size) };
+        let storage = self.storage.read().unwrap();
+
+        let page = unsafe { storage.get(self.fetch_from(), page_size) };
+
         let node = Node::<K, &[u8]>::from_raw(page.as_ref(), key_buffer_size);
+
         f(node)
-    }
-
-    unsafe fn make_mut(self) -> PageHandle<'a, borrow::Mutable> {
-        let PageHandle { id, borrow, .. } = self;
-
-        PageHandle {
-            id,
-            _lifetime_marker: PhantomData,
-            borrow: borrow::Mutable {
-                raw_ptr: borrow.raw_ptr as *mut u8,
-            },
-        }
     }
 }
 
 impl<'a> PageHandle<'a, borrow::Mutable> {
     pub fn as_node_mut<K, R>(
         &self,
-        page_size: usize,
+        page_size: u64,
         key_buffer_size: usize,
         f: impl FnOnce(Node<K, &mut [u8]>) -> R,
     ) -> R
     where
         K: Key,
     {
-        let page: &'a mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(self.borrow.raw_ptr, page_size) };
+        let storage = self.storage.read().unwrap();
+
+        // resizing here would make it harder to avoid deadlocks, so we must ensure that the given page
+        // is already in range
+        let page = unsafe {
+            storage
+                .get_mut(self.fetch_from(), page_size)
+                .expect("mutable page handle shouldn't need to resize")
+        };
+
         let node = Node::<K, &mut [u8]>::from_raw(page.as_mut(), key_buffer_size);
+
         f(node)
     }
 
-    pub fn id(&self) -> PageId {
-        self.id
+    pub fn as_slice(&self, f: impl FnOnce(&mut [u8])) {
+        let storage = self.storage.read().unwrap();
+
+        let page = unsafe { storage.get_mut(self.fetch_from(), self.page_size).unwrap() };
+
+        f(page);
     }
 }
 
