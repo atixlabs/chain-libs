@@ -54,14 +54,14 @@ impl MmapStorage {
         }
 
         let location: usize = location.try_into().unwrap();
-        let count: usize = count.try_into().unwrap();
+        let count: usize = dbg!(count).try_into().unwrap();
 
         // this unwrap can't fail because we already checked for size before
         // I don't think we need any extra synchronization here,
         // at least I don't think get_mut modifies any shared state
 
         Ok((*self.mmap.get())
-            .get_mut(location..location + count)
+            .get_mut(dbg!(location)..dbg!(location + count))
             .unwrap())
     }
 

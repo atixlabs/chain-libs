@@ -12,13 +12,12 @@ use crate::mem_page::MemPage;
 use crate::Key;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::convert::TryInto;
 use std::marker::PhantomData;
-use transaction::{
-    traits::{ReadTransaction as _, WriteTransaction as _},
-    InsertTransaction, ReadTransaction,
-};
+use transaction::{InsertTransaction, MutablePage, ReadTransaction};
 
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(crate) struct TransactionManager {
     latest_version: Arc<RwLock<Arc<Version>>>,
@@ -53,14 +52,16 @@ impl Version {
 
 /// this is basically a stack, but it will rename pointers and interact with the builder in order to reuse
 /// already cloned pages
-pub struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, K>
+pub struct InsertBacktrack<'txbuilder, 'txmanager: 'txbuilder, 'storage: 'txmanager, K>
 where
     K: Key,
 {
-    builder: &'txbuilder mut transaction::InsertTransaction<'txmanager>,
+    builder: &'txbuilder mut transaction::InsertTransaction<'txmanager, 'storage>,
     backtrack: Vec<PageId>,
     new_root: Option<PageId>,
     phantom_key: PhantomData<[K]>,
+    page_size: u64,
+    key_buffer_size: u32,
 }
 
 impl TransactionManager {
@@ -85,17 +86,20 @@ impl TransactionManager {
     }
 
     pub fn latest_version(&self) -> Arc<Version> {
-        self.latest_version.read().unwrap().clone()
+        self.latest_version.read().clone()
     }
 
-    pub fn read_transaction(&self, pages: Arc<RwLock<Pages>>) -> ReadTransaction {
-        ReadTransaction::new(self.latest_version(), pages)
+    pub fn read_transaction<'a>(&self, pages: &'a RwLock<Pages>) -> ReadTransaction<'a> {
+        let guard = pages.read();
+        ReadTransaction::new(self.latest_version(), guard)
     }
 
     pub fn insert_transaction<'me, 'index: 'me>(
         &'me self,
-        pages: Arc<RwLock<Pages>>,
-    ) -> InsertTransaction<'me> {
+        pages: &'index RwLock<Pages>,
+        key_buffer_size: u32,
+        page_size: u64,
+    ) -> InsertTransaction<'me, 'index> {
         let page_manager = self.page_manager.lock().unwrap();
         let versions = self.versions.lock().unwrap();
 
@@ -103,12 +107,14 @@ impl TransactionManager {
             current_root: self.latest_version().root(),
             shadows: HashMap::new(),
             old_ids: vec![],
-            pages,
+            pages: Some(pages.upgradable_read()),
             current: None,
             page_manager,
             versions,
             current_version: self.latest_version.clone(),
             version: self.latest_version(),
+            key_buffer_size,
+            page_size,
         }
     }
 
@@ -160,87 +166,82 @@ impl TransactionManager {
 }
 
 impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
-    InsertBacktrack<'txbuilder, 'txmanager, K>
+    InsertBacktrack<'txbuilder, 'txmanager, 'index, K>
 where
     K: Key,
 {
     pub(crate) fn search_for(&mut self, key: &K) {
-        // let mut current = self.builder.root();
+        let mut current = self.builder.root();
 
-        // loop {
-        //     let page = self.builder.get_page(current).unwrap();
+        loop {
+            let page = self.builder.get_page(current).unwrap();
 
-        //     let found_leaf = page.as_node(
-        //         self.page_size,
-        //         self.key_buffer_size,
-        //         |node: Node<K, &[u8]>| {
-        //             if let Some(inode) = node.as_internal() {
-        //                 let upper_pivot = match inode.keys().binary_search(key) {
-        //                     Ok(pos) => Some(pos + 1),
-        //                     Err(pos) => Some(pos),
-        //                 }
-        //                 .filter(|pos| pos < &inode.children().len());
+            let found_leaf = page.as_node(
+                self.page_size,
+                self.key_buffer_size.try_into().unwrap(),
+                |node: Node<K, &[u8]>| {
+                    if let Some(inode) = node.as_internal() {
+                        let upper_pivot = match inode.keys().binary_search(key) {
+                            Ok(pos) => Some(pos + 1),
+                            Err(pos) => Some(pos),
+                        }
+                        .filter(|pos| pos < &inode.children().len());
 
-        //                 if let Some(upper_pivot) = upper_pivot {
-        //                     current = inode.children().get(upper_pivot).unwrap().clone();
-        //                 } else {
-        //                     let last = inode.children().len().checked_sub(1).unwrap();
-        //                     current = inode.children().get(last).unwrap().clone();
-        //                 }
-        //                 false
-        //             } else {
-        //                 true
-        //             }
-        //         },
-        //     );
+                        if let Some(upper_pivot) = upper_pivot {
+                            current = inode.children().get(upper_pivot).unwrap().clone();
+                        } else {
+                            let last = inode.children().len().checked_sub(1).unwrap();
+                            current = inode.children().get(last).unwrap().clone();
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
 
-        //     self.backtrack.push(page);
+            self.backtrack.push(page.id());
 
-        //     if found_leaf {
-        //         break;
-        //     }
-        // }
+            if found_leaf {
+                break;
+            }
+        }
     }
 
     pub(crate) fn get_next(&mut self) -> Option<PageHandle<Mutable>> {
-        // let id = match self.backtrack.pop() {
-        //     Some(id) => id,
-        //     None => return None,
-        // };
+        let id = match self.backtrack.pop() {
+            Some(id) => id,
+            None => return None,
+        };
 
-        // if self.backtrack.is_empty() {
-        //     assert!(self.new_root.is_none());
-        //     self.new_root = Some(id);
-        // }
+        let parent_id = self.backtrack.last().cloned();
 
-        // let mut_page = self.builder.mut_page(id).unwrap();
+        if self.backtrack.is_empty() {
+            assert!(self.new_root.is_none());
+            self.new_root = Some(id);
+        }
 
-        // match mut_page {
-        //     transaction::MutPage::NeedsShadow { old_id, page } => {
-        //         self.rename_parent(old_id, id);
-        //         Some(page)
-        //     }
-        //     transaction::MutPage::AlreadyInTransaction(handle) => handle,
-        // };
-        unimplemented!()
-    }
+        let page_size = self.page_size;
+        // TODO: Remove as
+        let key_buffer_size = self.key_buffer_size as usize;
 
-    pub(crate) fn rename_parent(&mut self, old_id: PageId, new_id: PageId) {
-        // let parent = match self.backtrack.last_mut() {
-        //     Some((_, parent)) => parent,
-        //     None => return,
-        // };
+        use transaction::MutablePage;
+        match self.builder.mut_page(id) {
+            transaction::MutablePage::NewShadowingPage(mut rename_in_parents) => {
+                let mut rename_in_parents = rename_in_parents;
+                for id in self.backtrack.iter().rev() {
+                    let result =
+                        rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, dbg!(*id));
 
-        // parent.as_node_mut(|mut node: Node<K, &mut [u8]>| {
-        //     let mut node = node.as_internal_mut().unwrap();
-        //     let pos_to_update = match node.children().linear_search(&old_id) {
-        //         Some(pos) => pos,
-        //         None => unreachable!(),
-        //     };
-
-        //     node.children_mut().update(pos_to_update, &new_id).unwrap();
-        // });
-        unimplemented!()
+                    match result {
+                        MutablePage::NewShadowingPage(rename) => rename_in_parents = rename,
+                        MutablePage::InTransaction(handle) => return Some(handle),
+                    }
+                }
+                Some(rename_in_parents.finish())
+            }
+            transaction::MutablePage::InTransaction(handle) => Some(handle),
+        }
     }
 
     pub(crate) fn has_next(&self) -> bool {
@@ -261,16 +262,17 @@ where
     }
 }
 
-impl<'txbuilder, 'txmanager: 'txbuilder, K> Drop for InsertBacktrack<'txbuilder, 'txmanager, K>
+impl<'txbuilder, 'txmanager: 'txbuilder, 'storage: 'txmanager, K> Drop
+    for InsertBacktrack<'txbuilder, 'txmanager, 'storage, K>
 where
     K: Key,
 {
     fn drop(&mut self) {
-        while let Some(_) = InsertBacktrack::<'txbuilder, 'txmanager, K>::get_next(self) {
-            ()
+        if let Some(new_root) = self.new_root {
+            self.builder.current_root = new_root;
+        } else {
+            self.builder.current_root = *self.backtrack.first().unwrap();
         }
-
-        self.builder.current_root = self.new_root.unwrap();
     }
 }
 

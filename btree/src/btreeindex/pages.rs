@@ -13,9 +13,8 @@ use std::sync::{Arc, RwLock};
 /// a heap allocated read/write page, while PageRef is a wrapper to share a read only page in an Arc
 /// when we move to mmap, this things may change to take advantage of zero copy.
 
-#[derive(Clone)]
 pub struct Pages {
-    storage: Arc<RwLock<MmapStorage>>,
+    storage: MmapStorage,
     page_size: u16,
     // TODO: we need to remove this from here
     key_buffer_size: u32,
@@ -39,8 +38,6 @@ impl Pages {
             key_buffer_size,
         } = params;
 
-        let storage = Arc::new(RwLock::new(storage));
-
         Pages {
             storage,
             page_size,
@@ -51,34 +48,54 @@ impl Pages {
     pub fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, borrow::Immutable>> {
         // TODO: Check the page is actually in range
         // TODO: check mutable aliasing
-        let handle = PageHandle::new(id, &self.storage, u64::from(self.page_size));
+        let mut storage = &self.storage;
+        let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
+            * u64::from(self.page_size);
+
+        let page = unsafe { storage.get(from, u64::from(self.page_size)) };
+        let handle = PageHandle {
+            id,
+            page_size: u64::from(self.page_size),
+            borrow: borrow::Immutable { borrow: page },
+            page_marker: PhantomData,
+        };
 
         Some(handle)
     }
 
     pub fn mut_page<'a>(&'a self, id: PageId) -> Result<PageHandle<'a, borrow::Mutable>, ()> {
         // TODO: add checks so the same page is not mutated more than once
-        let mut storage = self.storage.read().unwrap();
+        let mut storage = &self.storage;
         let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
             * u64::from(self.page_size);
 
         // Make sure there is a mapped area for this page
-        match unsafe { storage.get_mut(from, from + u64::from(self.page_size)) } {
-            Ok(page) => Ok(PageHandle::new(
+        match unsafe { storage.get_mut(from, u64::from(self.page_size)) } {
+            Ok(page) => Ok(PageHandle {
                 id,
-                &self.storage,
-                u64::from(self.page_size),
-            )),
+                borrow: borrow::Mutable { borrow: page },
+                page_size: u64::from(self.page_size),
+                page_marker: PhantomData,
+            }),
             Err(_) => Err(()),
         }
     }
 
     pub fn make_shadow(&self, old_id: PageId, new_id: PageId) -> Result<(), ()> {
-        unimplemented!()
+        assert!(old_id != new_id);
+        let page_old = self
+            .get_page(old_id)
+            .expect("tried to shadow non existing page");
+
+        let mut page_new = self.mut_page(new_id)?;
+
+        page_new.as_slice(|slice| slice.copy_from_slice(page_old.borrow.borrow));
+
+        Ok(())
     }
 
     pub fn extend(&mut self, to: PageId) -> Result<(), std::io::Error> {
-        let mut storage = self.storage.write().unwrap();
+        let mut storage = &mut self.storage;
 
         let from = u64::from(to.checked_sub(1).expect("0 page is used as a null ptr"))
             * u64::from(self.page_size);
@@ -87,50 +104,34 @@ impl Pages {
     }
 
     pub(crate) fn sync_file(&self) -> Result<(), std::io::Error> {
-        self.storage
-            .write()
-            .expect("Coulnd't acquire tree index lock")
-            .sync()
+        self.storage.sync()
     }
 }
 
 pub mod borrow {
     use super::*;
-    pub enum Immutable {}
-    pub enum Mutable {}
+    pub struct Immutable<'a> {
+        pub borrow: &'a [u8],
+    }
+    pub struct Mutable<'a> {
+        pub borrow: &'a mut [u8],
+    }
 }
 
-pub struct PageHandle<'a, Borrow> {
+pub struct PageHandle<'a, Borrow: 'a> {
     id: PageId,
-    storage: &'a RwLock<MmapStorage>,
-    borrow_marker: PhantomData<Borrow>,
+    borrow: Borrow,
     page_size: u64,
+    page_marker: PhantomData<&'a Borrow>,
 }
 
 impl<'a, T> PageHandle<'a, T> {
-    fn new(id: PageId, storage: &'a RwLock<MmapStorage>, page_size: u64) -> Self {
-        PageHandle {
-            id,
-            storage,
-            borrow_marker: PhantomData,
-            page_size,
-        }
-    }
-
-    fn fetch_from(&self) -> u64 {
-        u64::from(
-            self.id
-                .checked_sub(1)
-                .expect("0 page is used as a null ptr"),
-        ) * u64::from(self.page_size)
-    }
-
     pub fn id(&self) -> PageId {
         self.id
     }
 }
 
-impl<'a> PageHandle<'a, borrow::Immutable> {
+impl<'a> PageHandle<'a, borrow::Immutable<'a>> {
     pub fn as_node<K, R>(
         &self,
         page_size: u64,
@@ -140,9 +141,7 @@ impl<'a> PageHandle<'a, borrow::Immutable> {
     where
         K: Key,
     {
-        let storage = self.storage.read().unwrap();
-
-        let page = unsafe { storage.get(self.fetch_from(), page_size) };
+        let page = self.borrow.borrow;
 
         let node = Node::<K, &[u8]>::from_raw(page.as_ref(), key_buffer_size);
 
@@ -150,9 +149,9 @@ impl<'a> PageHandle<'a, borrow::Immutable> {
     }
 }
 
-impl<'a> PageHandle<'a, borrow::Mutable> {
+impl<'a> PageHandle<'a, borrow::Mutable<'a>> {
     pub fn as_node_mut<K, R>(
-        &self,
+        &mut self,
         page_size: u64,
         key_buffer_size: usize,
         f: impl FnOnce(Node<K, &mut [u8]>) -> R,
@@ -160,27 +159,12 @@ impl<'a> PageHandle<'a, borrow::Mutable> {
     where
         K: Key,
     {
-        let storage = self.storage.read().unwrap();
-
-        // resizing here would make it harder to avoid deadlocks, so we must ensure that the given page
-        // is already in range
-        let page = unsafe {
-            storage
-                .get_mut(self.fetch_from(), page_size)
-                .expect("mutable page handle shouldn't need to resize")
-        };
-
-        let node = Node::<K, &mut [u8]>::from_raw(page.as_mut(), key_buffer_size);
-
+        let node = Node::<K, &mut [u8]>::from_raw(self.borrow.borrow, key_buffer_size);
         f(node)
     }
 
-    pub fn as_slice(&self, f: impl FnOnce(&mut [u8])) {
-        let storage = self.storage.read().unwrap();
-
-        let page = unsafe { storage.get_mut(self.fetch_from(), self.page_size).unwrap() };
-
-        f(page);
+    pub fn as_slice(&mut self, f: impl FnOnce(&mut [u8])) {
+        f(self.borrow.borrow);
     }
 }
 

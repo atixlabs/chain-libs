@@ -48,8 +48,8 @@ where
     /// this shouldn't be called before calling `init`
     // TODO: add more rigorous type checking?
     pub fn from_raw(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
         assert!(data.as_ref().len() > 0);
 
         let size_per_key = key_buffer_size + size_of::<PageId>();
@@ -271,8 +271,8 @@ where
     T: AsRef<[u8]> + 'b,
 {
     pub fn view(key_buffer_size: usize, data: T) -> InternalNode<'b, K, T> {
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
         assert!(data.as_ref().len() > 0);
 
         let size_per_key = key_buffer_size + size_of::<PageId>();

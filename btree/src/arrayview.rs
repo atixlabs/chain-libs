@@ -28,12 +28,12 @@ where
     T: AsRef<[u8]> + 'elements,
 {
     pub(crate) fn new_static_size(data: T, len: usize) -> ArrayView<'elements, T, E> {
-        assert_eq!(
-            data.as_ref()
-                .as_ptr()
-                .align_offset(std::mem::align_of::<E>()),
-            0
-        );
+        // assert_eq!(
+        //     data.as_ref()
+        //         .as_ptr()
+        //         .align_offset(std::mem::align_of::<E>()),
+        //     0
+        // );
 
         ArrayView {
             data,
@@ -54,14 +54,14 @@ where
         len: usize,
         element_size: usize,
     ) -> ArrayView<'elements, T, E> {
-        assert_eq!(
-            if element_size < 8 {
-                data.as_ref().as_ptr().align_offset(element_size)
-            } else {
-                0
-            },
-            0
-        );
+        // assert_eq!(
+        //     if element_size < 8 {
+        //         data.as_ref().as_ptr().align_offset(element_size)
+        //     } else {
+        //         0
+        //     },
+        //     0
+        // );
 
         ArrayView {
             data,
