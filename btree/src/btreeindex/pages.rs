@@ -2,12 +2,7 @@ use crate::btreeindex::node::Node;
 use crate::btreeindex::PageId;
 use crate::storage::MmapStorage;
 use crate::Key;
-use crate::MemPage;
-use byteorder::{ByteOrder, LittleEndian};
-use std::collections::HashMap;
-use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
-use std::sync::{Arc, RwLock};
 
 /// An abstraction over a paged file, Pages is kind of an array but backed from disk. Page represents at the moment
 /// a heap allocated read/write page, while PageRef is a wrapper to share a read only page in an Arc
@@ -16,8 +11,6 @@ use std::sync::{Arc, RwLock};
 pub struct Pages {
     storage: MmapStorage,
     page_size: u16,
-    // TODO: we need to remove this from here
-    key_buffer_size: u32,
 }
 
 // TODO: move this unsafe impls to MmapStorage? although what is most safe is saying that RwLock<MmapStorage> is Sync + Send
@@ -35,27 +28,22 @@ impl Pages {
         let PagesInitializationParams {
             storage,
             page_size,
-            key_buffer_size,
+            key_buffer_size: _,
         } = params;
 
-        Pages {
-            storage,
-            page_size,
-            key_buffer_size,
-        }
+        Pages { storage, page_size }
     }
 
     pub fn get_page<'a>(&'a self, id: PageId) -> Option<PageHandle<'a, borrow::Immutable>> {
         // TODO: Check the page is actually in range
         // TODO: check mutable aliasing
-        let mut storage = &self.storage;
+        let storage = &self.storage;
         let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
             * u64::from(self.page_size);
 
         let page = unsafe { storage.get(from, u64::from(self.page_size)) };
         let handle = PageHandle {
             id,
-            page_size: u64::from(self.page_size),
             borrow: borrow::Immutable { borrow: page },
             page_marker: PhantomData,
         };
@@ -65,7 +53,7 @@ impl Pages {
 
     pub fn mut_page<'a>(&'a self, id: PageId) -> Result<PageHandle<'a, borrow::Mutable>, ()> {
         // TODO: add checks so the same page is not mutated more than once
-        let mut storage = &self.storage;
+        let storage = &self.storage;
         let from = u64::from(id.checked_sub(1).expect("0 page is used as a null ptr"))
             * u64::from(self.page_size);
 
@@ -74,7 +62,6 @@ impl Pages {
             Ok(page) => Ok(PageHandle {
                 id,
                 borrow: borrow::Mutable { borrow: page },
-                page_size: u64::from(self.page_size),
                 page_marker: PhantomData,
             }),
             Err(_) => Err(()),
@@ -95,7 +82,7 @@ impl Pages {
     }
 
     pub fn extend(&mut self, to: PageId) -> Result<(), std::io::Error> {
-        let mut storage = &mut self.storage;
+        let storage = &mut self.storage;
 
         let from = u64::from(to.checked_sub(1).expect("0 page is used as a null ptr"))
             * u64::from(self.page_size);
@@ -109,7 +96,7 @@ impl Pages {
 }
 
 pub mod borrow {
-    use super::*;
+
     pub struct Immutable<'a> {
         pub borrow: &'a [u8],
     }
@@ -121,7 +108,6 @@ pub mod borrow {
 pub struct PageHandle<'a, Borrow: 'a> {
     id: PageId,
     borrow: Borrow,
-    page_size: u64,
     page_marker: PhantomData<&'a Borrow>,
 }
 
@@ -134,7 +120,7 @@ impl<'a, T> PageHandle<'a, T> {
 impl<'a> PageHandle<'a, borrow::Immutable<'a>> {
     pub fn as_node<K, R>(
         &self,
-        page_size: u64,
+        _page_size: u64,
         key_buffer_size: usize,
         f: impl FnOnce(Node<K, &[u8]>) -> R,
     ) -> R
@@ -152,7 +138,7 @@ impl<'a> PageHandle<'a, borrow::Immutable<'a>> {
 impl<'a> PageHandle<'a, borrow::Mutable<'a>> {
     pub fn as_node_mut<K, R>(
         &mut self,
-        page_size: u64,
+        _page_size: u64,
         key_buffer_size: usize,
         f: impl FnOnce(Node<K, &mut [u8]>) -> R,
     ) -> R

@@ -4,17 +4,14 @@ use super::Metadata;
 use super::Node;
 use super::PageId;
 use crate::btreeindex::page_manager::PageManager;
-use crate::btreeindex::pages::{
-    borrow::{Immutable, Mutable},
-    PageHandle,
-};
+use crate::btreeindex::pages::{borrow::Mutable, PageHandle};
 use crate::mem_page::MemPage;
 use crate::Key;
-use std::cell::RefCell;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::marker::PhantomData;
-use transaction::{InsertTransaction, MutablePage, ReadTransaction};
+use transaction::{InsertTransaction, ReadTransaction};
 
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -225,13 +222,13 @@ where
         }
     }
 
-    pub(crate) fn get_next(&mut self) -> Option<PageHandle<Mutable>> {
+    pub(crate) fn get_next(&mut self) -> Result<Option<PageHandle<Mutable>>, std::io::Error> {
         let id = match self.backtrack.pop() {
             Some(id) => id,
-            None => return None,
+            None => return Ok(None),
         };
 
-        let parent_id = &self.backtrack.last().cloned();
+        let _parent_id = &self.backtrack.last().cloned();
 
         if self.backtrack.is_empty() {
             assert!(self.new_root.is_none());
@@ -243,21 +240,21 @@ where
         let key_buffer_size = self.key_buffer_size as usize;
 
         use transaction::MutablePage;
-        match self.builder.mut_page(id) {
-            transaction::MutablePage::NewShadowingPage(mut rename_in_parents) => {
+        match self.builder.mut_page(id)? {
+            transaction::MutablePage::NewShadowingPage(rename_in_parents) => {
                 let mut rename_in_parents = rename_in_parents;
                 for id in self.backtrack.iter().rev() {
                     let result =
-                        rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, *id);
+                        rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, *id)?;
 
                     match result {
                         MutablePage::NewShadowingPage(rename) => rename_in_parents = rename,
-                        MutablePage::InTransaction(handle) => return Some(handle),
+                        MutablePage::InTransaction(handle) => return Ok(Some(handle)),
                     }
                 }
-                Some(rename_in_parents.finish())
+                Ok(Some(rename_in_parents.finish()))
             }
-            transaction::MutablePage::InTransaction(handle) => Some(handle),
+            transaction::MutablePage::InTransaction(handle) => Ok(Some(handle)),
         }
     }
 
@@ -269,13 +266,23 @@ where
         self.builder.current_root()
     }
 
-    pub(crate) fn add_new_node(&mut self, mem_page: MemPage, key_buffer_size: u32) -> PageId {
+    pub(crate) fn add_new_node(
+        &mut self,
+        mem_page: MemPage,
+        key_buffer_size: u32,
+    ) -> Result<PageId, std::io::Error> {
         self.builder.add_new_node(mem_page, key_buffer_size)
     }
 
-    pub(crate) fn new_root(&mut self, mem_page: MemPage, key_buffer_size: u32) {
-        let id = self.builder.add_new_node(mem_page, key_buffer_size);
+    pub(crate) fn new_root(
+        &mut self,
+        mem_page: MemPage,
+        key_buffer_size: u32,
+    ) -> Result<(), std::io::Error> {
+        let id = self.builder.add_new_node(mem_page, key_buffer_size)?;
         self.new_root = Some(id);
+
+        Ok(())
     }
 }
 

@@ -26,14 +26,6 @@ where
     K: Key,
     T: AsMut<[u8]> + AsRef<[u8]> + 'b,
 {
-    pub(crate) fn from_raw_mut(data: T, key_buffer_size: usize) -> Node<K, T> {
-        Node {
-            data,
-            key_buffer_size,
-            phantom: PhantomData,
-        }
-    }
-
     pub(crate) fn new_internal(key_buffer_size: usize, buffer: T) -> Node<K, T> {
         let mut buffer = buffer;
         buffer.as_mut()[0..TAG_SIZE].copy_from_slice(&0u64.to_le_bytes());

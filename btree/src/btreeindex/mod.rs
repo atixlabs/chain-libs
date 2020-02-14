@@ -23,7 +23,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub type PageId = u32;
 
@@ -74,7 +74,7 @@ where
         let mut root_page = match pages.mut_page(first_page_id) {
             Ok(page) => page,
             Err(_) => {
-                pages.extend(first_page_id);
+                pages.extend(first_page_id)?;
                 // this is infallible now
                 pages.mut_page(first_page_id).unwrap()
             }
@@ -217,7 +217,7 @@ where
         backtrack.search_for(&key);
 
         let needs_recurse = {
-            let leaf = backtrack.get_next().unwrap();
+            let leaf = backtrack.get_next()?.unwrap();
             let leaf_id = leaf.id();
             self.insert_in_leaf(leaf, key, value)?
                 .map(|(split_key, new_node)| (leaf_id, split_key, new_node))
@@ -225,13 +225,13 @@ where
 
         if let Some((leaf_id, split_key, new_node)) = needs_recurse {
             let id =
-                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size);
+                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size)?;
 
             if backtrack.has_next() {
                 self.insert_in_internals(split_key, id, &mut backtrack)?;
             } else {
                 let new_root = self.create_internal_node(leaf_id, id, split_key);
-                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size);
+                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size)?;
             }
         }
 
@@ -285,7 +285,7 @@ where
         let mut right_id = to_insert;
         loop {
             let (current_id, new_split_key, new_node) = {
-                let mut node = backtrack.get_next().unwrap();
+                let mut node = backtrack.get_next()?.unwrap();
                 let node_id = node.id();
                 let key_size = usize::try_from(self.static_settings.key_buffer_size).unwrap();
                 let page_size = self.static_settings.page_size.try_into().unwrap();
@@ -308,7 +308,7 @@ where
             };
 
             let new_id =
-                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size);
+                backtrack.add_new_node(new_node.to_page(), self.static_settings.key_buffer_size)?;
 
             if backtrack.has_next() {
                 // set values to insert in next iteration (recurse on parent)
@@ -319,7 +319,7 @@ where
                 let right_id = new_id;
                 let new_root = self.create_internal_node(left_id, right_id, new_split_key);
 
-                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size);
+                backtrack.new_root(new_root.to_page(), self.static_settings.key_buffer_size)?;
                 return Ok(());
             }
         }
@@ -499,11 +499,13 @@ mod tests {
         let tree_file = tempfile().unwrap();
         let static_file = tempfile().unwrap();
 
+        let page_size = 88;
+
         let tree: BTree<U64Key> = BTree::new(
             metadata_file,
             tree_file,
             static_file,
-            86,
+            page_size,
             size_of::<U64Key>().try_into().unwrap(),
         )
         .unwrap();

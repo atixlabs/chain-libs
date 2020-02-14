@@ -1,6 +1,6 @@
 use memmap::MmapMut;
 use std::cell::UnsafeCell;
-use std::convert::TryFrom;
+
 use std::convert::TryInto;
 use std::fs::File;
 use std::io;

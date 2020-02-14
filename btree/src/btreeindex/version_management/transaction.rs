@@ -4,11 +4,9 @@ use crate::btreeindex::{
     page_manager::PageManager,
     Node, PageHandle, PageId, Pages,
 };
-use crate::mem_page::MemPage;
 use crate::Key;
 use parking_lot::lock_api;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::{Arc, MutexGuard};
@@ -31,8 +29,8 @@ impl<'a, 'b: 'a, 'c: 'b> RenamePointers<'a, 'b, 'c> {
         page_size: u64,
         key_buffer_size: usize,
         parent_id: PageId,
-    ) -> MutablePage<'a, 'b, 'c> {
-        let (parent_needs_shadowing, mut parent) = self.tx.mut_page_unchecked(parent_id);
+    ) -> Result<MutablePage<'a, 'b, 'c>, std::io::Error> {
+        let (parent_needs_shadowing, mut parent) = self.tx.mut_page_unchecked(parent_id)?;
 
         let old_id = self.last_old_id;
         let new_id = self.last_new_id;
@@ -52,19 +50,19 @@ impl<'a, 'b: 'a, 'c: 'b> RenamePointers<'a, 'b, 'c> {
 
         let parent_new_id = parent.id();
         if parent_needs_shadowing {
-            MutablePage::NewShadowingPage(RenamePointers {
+            Ok(MutablePage::NewShadowingPage(RenamePointers {
                 tx: self.tx,
                 last_old_id: parent_id,
                 last_new_id: parent_new_id,
                 shadowed_page: self.shadowed_page,
-            })
+            }))
         } else {
-            MutablePage::InTransaction(self.finish())
+            Ok(MutablePage::InTransaction(self.finish()))
         }
     }
 
     pub fn finish(self) -> PageHandle<'a, Mutable<'a>> {
-        match self.tx.mut_page(self.shadowed_page) {
+        match self.tx.mut_page(self.shadowed_page).unwrap() {
             MutablePage::InTransaction(handle) => handle,
             _ => unreachable!(),
         }
@@ -125,8 +123,8 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
     pub fn add_new_node(
         &mut self,
         mem_page: crate::mem_page::MemPage,
-        key_buffer_size: u32,
-    ) -> PageId {
+        _key_buffer_size: u32,
+    ) -> Result<PageId, std::io::Error> {
         let id = self.page_manager.new_id();
 
         let result = self.pages.as_ref().unwrap().mut_page(id);
@@ -134,7 +132,7 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
         let mut page_handle = match result {
             Ok(page_handle) => page_handle,
             Err(()) => {
-                self.extend_storage(id);
+                self.extend_storage(id)?;
                 // infallible now, after extending the storage
                 self.pages.as_ref().unwrap().mut_page(id).unwrap()
             }
@@ -142,10 +140,13 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
 
         page_handle.as_slice(|page| page.copy_from_slice(mem_page.as_ref()));
 
-        id
+        Ok(id)
     }
 
-    pub fn mut_page(&mut self, id: PageId) -> MutablePage<'_, 'locks, 'storage> {
+    pub fn mut_page(
+        &mut self,
+        id: PageId,
+    ) -> Result<MutablePage<'_, 'locks, 'storage>, std::io::Error> {
         match self
             .shadows_image
             .get(&id)
@@ -159,17 +160,13 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
                     .mut_page(*id)
                     .expect("already fetched transaction was not allocated");
 
-                MutablePage::InTransaction(handle)
+                Ok(MutablePage::InTransaction(handle))
             }
             None => {
                 let old_id = id;
                 let new_id = self.page_manager.new_id();
 
-                let result = self
-                    .pages
-                    .as_ref()
-                    .unwrap()
-                    .make_shadow(old_id, new_id);
+                let result = self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
 
                 self.shadows.insert(old_id, new_id);
                 self.shadows_image.insert(new_id);
@@ -177,24 +174,29 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
                 match result {
                     Ok(()) => (),
                     Err(()) => {
-                        self.extend_storage(new_id);
-                        self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
+                        self.extend_storage(new_id)?;
+                        self.pages
+                            .as_ref()
+                            .unwrap()
+                            .make_shadow(old_id, new_id)
+                            .unwrap();
                     }
                 }
 
-                let handle = self.pages.as_ref().unwrap().mut_page(new_id).unwrap();
-
-                MutablePage::NewShadowingPage(RenamePointers {
+                Ok(MutablePage::NewShadowingPage(RenamePointers {
                     tx: self,
                     last_old_id: old_id,
                     last_new_id: new_id,
                     shadowed_page: old_id,
-                })
+                }))
             }
         }
     }
 
-    fn mut_page_unchecked(&mut self, id: PageId) -> (bool, PageHandle<Mutable>) {
+    fn mut_page_unchecked(
+        &mut self,
+        id: PageId,
+    ) -> Result<(bool, PageHandle<Mutable>), std::io::Error> {
         match self
             .shadows_image
             .get(&id)
@@ -208,17 +210,13 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
                     .mut_page(*id)
                     .expect("already fetched transaction was not allocated");
 
-                (false, handle)
+                Ok((false, handle))
             }
             None => {
                 let old_id = id;
                 let new_id = self.page_manager.new_id();
 
-                let result = self
-                    .pages
-                    .as_ref()
-                    .unwrap()
-                    .make_shadow(old_id, new_id);
+                let result = self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
 
                 self.shadows.insert(old_id, new_id);
                 self.shadows_image.insert(new_id);
@@ -226,26 +224,33 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
                 match result {
                     Ok(()) => (),
                     Err(()) => {
-                        self.extend_storage(new_id);
-                        self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
+                        self.extend_storage(new_id)?;
+                        // Infallible after extending
+                        self.pages
+                            .as_ref()
+                            .unwrap()
+                            .make_shadow(old_id, new_id)
+                            .unwrap();
                     }
                 }
 
                 let handle = self.pages.as_ref().unwrap().mut_page(new_id).unwrap();
 
-                (true, handle)
+                Ok((true, handle))
             }
         }
     }
 
-    fn extend_storage(&mut self, including: PageId) {
+    fn extend_storage(&mut self, including: PageId) -> Result<(), std::io::Error> {
         let mut write_guard =
             lock_api::RwLockUpgradableReadGuard::upgrade(self.pages.take().unwrap());
 
-        (*write_guard).extend(including);
+        (*write_guard).extend(including)?;
 
         let new_guard = lock_api::RwLockWriteGuard::downgrade_to_upgradable(write_guard);
         self.pages = Some(new_guard);
+
+        Ok(())
     }
 
     /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
