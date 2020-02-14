@@ -164,7 +164,7 @@ mod tests {
         let i2 = insertions[1];
         let i3 = insertions[2];
 
-        let buffer = MemPage::new(dbg!(mem_size));
+        let buffer = MemPage::new(mem_size);
         buffer.as_ref().len();
         let mut node: Node<U64Key, MemPage> =
             Node::new_internal(std::mem::size_of::<U64Key>(), buffer);
@@ -186,7 +186,6 @@ mod tests {
             _ => panic!("second insertion shouldn't split"),
         };
 
-        println!("Inserting splitting key");
         match node
             .as_internal_mut()
             .unwrap()

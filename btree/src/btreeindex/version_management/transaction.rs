@@ -9,7 +9,7 @@ use crate::Key;
 use parking_lot::lock_api;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::{Arc, MutexGuard};
 
@@ -64,7 +64,7 @@ impl<'a, 'b: 'a, 'c: 'b> RenamePointers<'a, 'b, 'c> {
     }
 
     pub fn finish(self) -> PageHandle<'a, Mutable<'a>> {
-        match self.tx.mut_page(dbg!(self.shadowed_page)) {
+        match self.tx.mut_page(self.shadowed_page) {
             MutablePage::InTransaction(handle) => handle,
             _ => unreachable!(),
         }
@@ -95,7 +95,7 @@ impl<'a> ReadTransaction<'a> {
 pub(crate) struct InsertTransaction<'locks, 'storage: 'locks> {
     pub current_root: PageId,
     pub shadows: HashMap<PageId, PageId>,
-    pub old_ids: Vec<PageId>,
+    pub shadows_image: HashSet<PageId>,
     pub current: Option<usize>,
     pub page_manager: MutexGuard<'locks, PageManager>,
     pub pages: Option<RwLockUpgradableReadGuard<'storage, Pages>>,
@@ -108,12 +108,18 @@ pub(crate) struct InsertTransaction<'locks, 'storage: 'locks> {
 
 impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
     pub fn root(&self) -> PageId {
-        self.current_root
+        self.shadows
+            .get(&self.current_root)
+            .map(|root| *root)
+            .unwrap_or(self.current_root)
     }
 
     pub fn get_page(&self, id: PageId) -> Option<PageHandle<Immutable>> {
-        // TODO: this should return from extra
-        self.pages.as_ref().unwrap().get_page(id)
+        self.shadows_image
+            .get(&id)
+            .or_else(|| self.shadows.get(&id))
+            .or_else(|| Some(&id))
+            .and_then(|id| self.pages.as_ref().unwrap().get_page(*id))
     }
 
     pub fn add_new_node(
@@ -123,22 +129,28 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
     ) -> PageId {
         let id = self.page_manager.new_id();
 
-        self.pages
-            .as_ref()
-            .unwrap()
-            .mut_page(id)
-            .unwrap()
-            .as_slice(|page| {
-                page.copy_from_slice(mem_page.as_ref());
-            });
+        let result = self.pages.as_ref().unwrap().mut_page(id);
+
+        let mut page_handle = match result {
+            Ok(page_handle) => page_handle,
+            Err(()) => {
+                self.extend_storage(id);
+                // infallible now, after extending the storage
+                self.pages.as_ref().unwrap().mut_page(id).unwrap()
+            }
+        };
+
+        page_handle.as_slice(|page| page.copy_from_slice(mem_page.as_ref()));
 
         id
     }
 
     pub fn mut_page(&mut self, id: PageId) -> MutablePage<'_, 'locks, 'storage> {
-        let new_id = dbg!(&self.shadows).get(&id);
-
-        match new_id {
+        match self
+            .shadows_image
+            .get(&id)
+            .or_else(|| self.shadows.get(&id))
+        {
             Some(id) => {
                 let handle = self
                     .pages
@@ -151,12 +163,16 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
             }
             None => {
                 let old_id = id;
-                self.old_ids.push(old_id);
                 let new_id = self.page_manager.new_id();
 
-                let result = self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
+                let result = self
+                    .pages
+                    .as_ref()
+                    .unwrap()
+                    .make_shadow(old_id, new_id);
 
-                self.shadows.insert(dbg!(old_id), dbg!(new_id));
+                self.shadows.insert(old_id, new_id);
+                self.shadows_image.insert(new_id);
 
                 match result {
                     Ok(()) => (),
@@ -179,9 +195,11 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
     }
 
     fn mut_page_unchecked(&mut self, id: PageId) -> (bool, PageHandle<Mutable>) {
-        let new_id = self.shadows.get(&id);
-
-        match new_id {
+        match self
+            .shadows_image
+            .get(&id)
+            .or_else(|| self.shadows.get(&id))
+        {
             Some(id) => {
                 let handle = self
                     .pages
@@ -194,12 +212,16 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
             }
             None => {
                 let old_id = id;
-                self.old_ids.push(old_id);
                 let new_id = self.page_manager.new_id();
 
-                self.shadows.insert(old_id, new_id);
+                let result = self
+                    .pages
+                    .as_ref()
+                    .unwrap()
+                    .make_shadow(old_id, new_id);
 
-                let result = self.pages.as_ref().unwrap().make_shadow(old_id, new_id);
+                self.shadows.insert(old_id, new_id);
+                self.shadows_image.insert(new_id);
 
                 match result {
                     Ok(()) => (),
@@ -209,7 +231,9 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
                     }
                 }
 
-                (true, self.pages.as_ref().unwrap().mut_page(new_id).unwrap())
+                let handle = self.pages.as_ref().unwrap().mut_page(new_id).unwrap();
+
+                (true, handle)
             }
         }
     }
@@ -224,10 +248,6 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
         self.pages = Some(new_guard);
     }
 
-    pub fn delete_node(&mut self, id: PageId) {
-        self.old_ids.push(id);
-    }
-
     /// commit creates a new version of the tree, it doesn't sync the file, but it makes the version
     /// available to new readers
     pub fn commit<K>(mut self)
@@ -235,20 +255,20 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
         K: Key,
     {
         let transaction = super::WriteTransaction {
-            new_root: self.current_root,
-            shadowed_pages: self.old_ids,
+            new_root: self.root(),
+            shadowed_pages: self.shadows.keys().cloned().collect(),
             // Pages allocated at the end, basically
             next_page_id: self.page_manager.next_page(),
         };
 
         let mut current_version = self.current_version.write();
 
-        self.versions.push_back(current_version.clone());
-
         *current_version = Arc::new(Version {
-            root: self.current_root,
+            root: self.root(),
             transaction,
         });
+
+        self.versions.push_back(current_version.clone());
     }
 }
 

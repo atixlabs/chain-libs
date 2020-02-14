@@ -11,7 +11,7 @@ use crate::btreeindex::pages::{
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use transaction::{InsertTransaction, MutablePage, ReadTransaction};
@@ -25,11 +25,13 @@ pub(crate) struct TransactionManager {
     page_manager: Mutex<PageManager>,
 }
 
+#[derive(Debug)]
 pub(crate) struct Version {
     root: PageId,
     transaction: WriteTransaction,
 }
 
+#[derive(Debug)]
 /// delta-like structure, it has the list of pages that can be collected after no readers are using them
 pub(crate) struct WriteTransaction {
     new_root: PageId,
@@ -106,7 +108,7 @@ impl TransactionManager {
         InsertTransaction {
             current_root: self.latest_version().root(),
             shadows: HashMap::new(),
-            old_ids: vec![],
+            shadows_image: HashSet::new(),
             pages: Some(pages.upgradable_read()),
             current: None,
             page_manager,
@@ -128,6 +130,21 @@ impl TransactionManager {
         let mut new_root = None;
 
         while versions.len() > 0 && Arc::strong_count(versions.front().unwrap()) == 1 {
+            // there is no race conditions between the check and this, because versions is locked and count == 1 means is the only reference
+            let version = versions.pop_front().unwrap();
+            // FIXME: remove this loop?
+            for id in version.transaction.shadowed_pages.iter().cloned() {
+                pages_to_release.push(id)
+            }
+
+            next_page_at_end = Some(version.transaction.next_page_id);
+            new_root = Some(version.transaction.new_root);
+        }
+
+        // TODO: this and the loop above are the same thing, but with a special case for the current key
+        // which will always have at least two refs, because it's stored separately, remove the duplication
+
+        if versions.len() == 1 && Arc::strong_count(versions.front().unwrap()) == 2 {
             // there is no race conditions between the check and this, because versions is locked and count == 1 means is the only reference
             let version = versions.pop_front().unwrap();
             // FIXME: remove this loop?
@@ -214,7 +231,7 @@ where
             None => return None,
         };
 
-        let parent_id = self.backtrack.last().cloned();
+        let parent_id = &self.backtrack.last().cloned();
 
         if self.backtrack.is_empty() {
             assert!(self.new_root.is_none());
@@ -231,7 +248,7 @@ where
                 let mut rename_in_parents = rename_in_parents;
                 for id in self.backtrack.iter().rev() {
                     let result =
-                        rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, dbg!(*id));
+                        rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, *id);
 
                     match result {
                         MutablePage::NewShadowingPage(rename) => rename_in_parents = rename,

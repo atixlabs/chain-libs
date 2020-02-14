@@ -214,8 +214,6 @@ where
         value: Value,
     ) -> Result<(), BTreeStoreError> {
         let mut backtrack = tx.backtrack();
-        let page_size = u64::from(self.static_settings.page_size);
-        let key_buffer_size = self.static_settings.key_buffer_size;
         backtrack.search_for(&key);
 
         let needs_recurse = {
@@ -523,13 +521,16 @@ mod tests {
         tree.insert_many((0..n).into_iter().map(|i| (U64Key(i), i)))
             .unwrap();
 
+        tree.debug_print();
+
         for i in 0..n {
-            assert_eq!(tree.lookup(&U64Key(i)).expect("Key not found"), i);
+            assert_eq!(tree.lookup(&U64Key(dbg!(i))).expect("Key not found"), i);
         }
     }
 
     #[quickcheck]
     fn qc_inserted_keys_are_found(xs: Vec<(u64, u64)>) -> bool {
+        println!("start qc test");
         let mut reference = std::collections::BTreeMap::new();
 
         let tree = new_tree();
@@ -544,7 +545,7 @@ mod tests {
 
         let prop = reference
             .iter()
-            .all(|(k, v)| match tree.lookup(&U64Key(*k)) {
+            .all(|(k, v)| match tree.lookup(&U64Key(*dbg!(k))) {
                 Some(l) => *v == l,
                 None => false,
             });

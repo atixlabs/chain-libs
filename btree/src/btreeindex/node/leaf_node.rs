@@ -251,8 +251,8 @@ where
 {
     /// same as from_raw but for inmutable slices
     pub(crate) fn view(key_buffer_size: usize, data: T) -> LeafNode<'b, K, T> {
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
-        assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<PageId>()), 0);
+        // assert_eq!(data.as_ref().as_ptr().align_offset(size_of::<u64>()), 0);
 
         let size_per_key = key_buffer_size + size_of::<V>();
         let extra_size = LEN_SIZE;
