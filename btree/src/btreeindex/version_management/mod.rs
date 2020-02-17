@@ -7,9 +7,8 @@ use crate::btreeindex::page_manager::PageManager;
 use crate::btreeindex::pages::{borrow::Mutable, PageHandle};
 use crate::mem_page::MemPage;
 use crate::Key;
-
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::convert::TryInto;
+use std::collections::VecDeque;
+use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
 use transaction::{InsertTransaction, ReadTransaction};
 
@@ -36,11 +35,12 @@ pub(crate) struct WriteTransaction {
     next_page_id: PageId,
 }
 
-/// this has locks, so no new transaction can occur while this is synced to disk
+// this has locks, so no new transaction can occur while this is synced to disk, they are not
+// actually used, but they gatekeep new write transactions
 pub(crate) struct Checkpoint<'a> {
     pub(crate) new_metadata: Metadata,
-    page_manager: MutexGuard<'a, PageManager>,
-    versions: MutexGuard<'a, VecDeque<Arc<Version>>>,
+    _page_manager: MutexGuard<'a, PageManager>,
+    _versions: MutexGuard<'a, VecDeque<Arc<Version>>>,
 }
 
 impl Version {
@@ -102,19 +102,15 @@ impl TransactionManager {
         let page_manager = self.page_manager.lock().unwrap();
         let versions = self.versions.lock().unwrap();
 
-        InsertTransaction {
-            current_root: self.latest_version().root(),
-            shadows: HashMap::new(),
-            shadows_image: HashSet::new(),
-            pages: Some(pages.upgradable_read()),
-            current: None,
+        InsertTransaction::new(
+            self.latest_version().root(),
+            pages,
             page_manager,
             versions,
-            current_version: self.latest_version.clone(),
-            version: self.latest_version(),
+            self.latest_version.clone(),
             key_buffer_size,
             page_size,
-        }
+        )
     }
 
     /// collect versions without readers, in order to reuse its pages (the ones that are shadow in transactions after that)
@@ -126,25 +122,16 @@ impl TransactionManager {
         let mut next_page_at_end = None;
         let mut new_root = None;
 
-        while versions.len() > 0 && Arc::strong_count(versions.front().unwrap()) == 1 {
+        // pop versions with only one reference from the front, as those are not reachable anymore
+        // also, if there is only one version this will have count of two, because it's also referenced
+        // from the current_version member variable, we still need to collect it, otherwise the checkpoint
+        // will not include data from the latest write transaction
+        while versions.len() > 0 && Arc::strong_count(versions.front().unwrap()) == 1
+            || versions.len() == 1 && Arc::strong_count(versions.front().unwrap()) == 2
+        {
             // there is no race conditions between the check and this, because versions is locked and count == 1 means is the only reference
             let version = versions.pop_front().unwrap();
-            // FIXME: remove this loop?
-            for id in version.transaction.shadowed_pages.iter().cloned() {
-                pages_to_release.push(id)
-            }
 
-            next_page_at_end = Some(version.transaction.next_page_id);
-            new_root = Some(version.transaction.new_root);
-        }
-
-        // TODO: this and the loop above are the same thing, but with a special case for the current key
-        // which will always have at least two refs, because it's stored separately, remove the duplication
-
-        if versions.len() == 1 && Arc::strong_count(versions.front().unwrap()) == 2 {
-            // there is no race conditions between the check and this, because versions is locked and count == 1 means is the only reference
-            let version = versions.pop_front().unwrap();
-            // FIXME: remove this loop?
             for id in version.transaction.shadowed_pages.iter().cloned() {
                 pages_to_release.push(id)
             }
@@ -173,8 +160,8 @@ impl TransactionManager {
                 root: new_root.unwrap(),
                 page_manager: page_manager_to_commit,
             },
-            page_manager,
-            versions,
+            _page_manager: page_manager,
+            _versions: versions,
         })
     }
 }
@@ -184,7 +171,7 @@ impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
 where
     K: Key,
 {
-    pub(crate) fn search_for(&mut self, key: &K) {
+    pub fn search_for(&mut self, key: &K) {
         let mut current = self.builder.root();
 
         loop {
@@ -222,7 +209,7 @@ where
         }
     }
 
-    pub(crate) fn get_next(&mut self) -> Result<Option<PageHandle<Mutable>>, std::io::Error> {
+    pub fn get_next(&mut self) -> Result<Option<PageHandle<Mutable>>, std::io::Error> {
         let id = match self.backtrack.pop() {
             Some(id) => id,
             None => return Ok(None),
@@ -236,19 +223,18 @@ where
         }
 
         let page_size = self.page_size;
-        // TODO: Remove as
-        let key_buffer_size = self.key_buffer_size as usize;
+        let key_buffer_size = usize::try_from(self.key_buffer_size).unwrap();
 
         use transaction::MutablePage;
         match self.builder.mut_page(id)? {
-            transaction::MutablePage::NewShadowingPage(rename_in_parents) => {
+            transaction::MutablePage::NeedsParentRedirect(rename_in_parents) => {
                 let mut rename_in_parents = rename_in_parents;
                 for id in self.backtrack.iter().rev() {
                     let result =
                         rename_in_parents.rename_parent::<K>(page_size, key_buffer_size, *id)?;
 
                     match result {
-                        MutablePage::NewShadowingPage(rename) => rename_in_parents = rename,
+                        MutablePage::NeedsParentRedirect(rename) => rename_in_parents = rename,
                         MutablePage::InTransaction(handle) => return Ok(Some(handle)),
                     }
                 }
@@ -258,15 +244,11 @@ where
         }
     }
 
-    pub(crate) fn has_next(&self) -> bool {
+    pub fn has_next(&self) -> bool {
         self.backtrack.last().is_some()
     }
 
-    pub(crate) fn current_root(&self) -> PageId {
-        self.builder.current_root()
-    }
-
-    pub(crate) fn add_new_node(
+    pub fn add_new_node(
         &mut self,
         mem_page: MemPage,
         key_buffer_size: u32,
@@ -274,7 +256,7 @@ where
         self.builder.add_new_node(mem_page, key_buffer_size)
     }
 
-    pub(crate) fn new_root(
+    pub fn new_root(
         &mut self,
         mem_page: MemPage,
         key_buffer_size: u32,
