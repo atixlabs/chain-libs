@@ -1,11 +1,14 @@
 use btree::{BTreeStore, Storeable};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use tempfile::tempdir;
 extern crate rand;
 use crate::rand::rngs::StdRng;
 use crate::rand::Rng as _;
 use crate::rand::SeedableRng;
 use byteorder::{ByteOrder, LittleEndian};
 use std::convert::TryInto;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 static SEED: u64 = 11;
 
@@ -30,7 +33,7 @@ fn single_key_insertion(c: &mut Criterion) {
     let key_size = std::mem::size_of::<U64Key>();
     let page_size = 4096;
 
-    let mut tree: BTreeStore<U64Key> =
+    let tree: BTreeStore<U64Key> =
         BTreeStore::new(dir_path, key_size.try_into().unwrap(), page_size).unwrap();
 
     let n: u64 = 2000000;
@@ -99,6 +102,82 @@ fn single_key_search(c: &mut Criterion) {
     std::fs::remove_dir_all(dir_path).unwrap();
 }
 
+fn multithreaded(c: &mut Criterion) {
+    let barrier = Arc::new(Barrier::new(3));
+    let key_size = std::mem::size_of::<U64Key>();
+
+    let dir = tempdir().unwrap();
+    let page_size = 4096;
+
+    let tree: Arc<BTreeStore<U64Key>> =
+        Arc::new(BTreeStore::new(dir.path(), key_size.try_into().unwrap(), page_size).unwrap());
+
+    let n: u64 = 200000;
+    let mut rng = StdRng::seed_from_u64(SEED);
+
+    tree.insert_many(
+        (0..n)
+            .step_by(2)
+            .map(|i| (U64Key(i.clone()), random_blob(&mut rng))),
+    )
+    .unwrap();
+
+    let mut handles = vec![];
+
+    let write_thread = {
+        let barrier = barrier.clone();
+        let tree = tree.clone();
+        let mut rng = StdRng::seed_from_u64(SEED);
+        thread::spawn(move || {
+            barrier.wait();
+            tree.insert_many(
+                (1..n)
+                    .step_by(2)
+                    .map(|i| (U64Key(i.clone()), random_blob(&mut rng))),
+            )
+            .unwrap();
+        })
+    };
+
+    handles.push(Some(write_thread));
+
+    let read_thread = {
+        let barrier = barrier.clone();
+        let tree = tree.clone();
+        let mut rng = StdRng::seed_from_u64(SEED);
+        thread::spawn(move || {
+            barrier.wait();
+            for _i in 1..n {
+                let r: u64 = rng.gen_range(0, n);
+                let key = if r % 2 == 0 { r + 1 } else { r };
+                tree.get(&U64Key(key)).unwrap_or(None);
+            }
+        })
+    };
+
+    handles.push(Some(read_thread));
+
+    barrier.wait();
+    c.bench_function("multithreaded", move |b| {
+        b.iter_custom(|iter| {
+            let time = std::time::Instant::now();
+            for _i in 0..iter {
+                black_box({
+                    let r: u64 = rng.gen_range(0, n - 1);
+                    let key = if r % 2 == 0 { r } else { r + 1 };
+                    tree.get(&U64Key(key)).unwrap().expect("Key not found");
+                })
+            }
+
+            time.elapsed()
+        });
+    });
+
+    for handle in handles.iter_mut() {
+        handle.take().unwrap().join().unwrap();
+    }
+}
+
 criterion_group!(
     name = insertion;
     config = Criterion::default().sample_size(10);
@@ -111,4 +190,10 @@ criterion_group!(
     targets = single_key_search
 );
 
-criterion_main!(insertion, search);
+criterion_group!(
+    name = thread_scaling;
+    config = Criterion::default().sample_size(100);
+    targets = multithreaded
+);
+
+criterion_main!(insertion, search, thread_scaling);
