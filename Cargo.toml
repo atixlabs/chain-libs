@@ -7,7 +7,6 @@ members = [
     "chain-time",
     "chain-crypto",
     "chain-storage",
-    "chain-storage-sqlite-old",
     "chain-impl-mockchain",
     "cardano-legacy-address",
     "network-core",
@@ -15,4 +14,5 @@ members = [
     "sparse-array",
     "typed-bytes",
     "btree",
+    "chain-storage-btree",
 ]
