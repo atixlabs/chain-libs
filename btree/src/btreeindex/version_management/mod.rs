@@ -1,4 +1,5 @@
 pub mod transaction;
+use super::node::SiblingHandle;
 use super::pages::*;
 use super::{transaction::PageRefMut, Metadata, Node, PageId};
 use crate::btreeindex::page_manager::PageManager;
@@ -232,7 +233,7 @@ where
 
         let key_buffer_size = usize::try_from(self.key_buffer_size).unwrap();
 
-        match self.tx.mut_page(id)? {
+        match self.tx.mut_page(id, None)? {
             transaction::MutablePage::NeedsParentRedirect(rename_in_parents) => {
                 // this part may be tricky, we need to recursively clone and redirect all the path
                 // from the root to the node we are writing to. We need the backtrack stack, because
@@ -245,12 +246,13 @@ where
 
                     match result {
                         MutablePage::NeedsParentRedirect(rename) => rename_in_parents = rename,
-                        MutablePage::InTransaction(handle) => return Ok(Some(handle)),
+                        MutablePage::InTransaction(handle, _) => return Ok(Some(handle)),
                     }
                 }
-                Ok(Some(rename_in_parents.finish()))
+                let (page, _) = rename_in_parents.finish();
+                Ok(Some(page))
             }
-            transaction::MutablePage::InTransaction(handle) => Ok(Some(handle)),
+            transaction::MutablePage::InTransaction(handle, _) => Ok(Some(handle)),
         }
     }
 
@@ -292,7 +294,7 @@ where
     }
 }
 
-struct DeleteNextElement<'a> {
+pub struct DeleteNextElement<'a> {
     next: PageHandle<'a, Mutable<'a>>,
     parent: Option<PageHandle<'a, Mutable<'a>>>,
     anchor: Option<usize>,
@@ -383,7 +385,16 @@ where
 
         let key_buffer_size = usize::try_from(self.key_buffer_size).unwrap();
 
-        let next = match self.tx.mut_page(id)? {
+        let (parent, anchor, left, right) = if self.backtrack.is_empty() {
+            (None, None, None, None)
+        } else {
+            let parent = self.backtrack.last().unwrap();
+
+            let (anchor, left, right) = self.parent_info.pop().unwrap();
+            (Some(parent), anchor, left, right)
+        };
+
+        let (next, parent) = match self.tx.mut_page(id, parent.map(|n| *n))? {
             transaction::MutablePage::NeedsParentRedirect(rename_in_parents) => {
                 // this part may be tricky, we need to recursively clone and redirect all the path
                 // from the root to the node we are writing to. We need the backtrack stack, because
@@ -402,8 +413,8 @@ where
                         MutablePage::NeedsParentRedirect(rename) => {
                             rename_in_parents = Some(rename)
                         }
-                        MutablePage::InTransaction(handle) => {
-                            finished = Some(handle);
+                        MutablePage::InTransaction(handle, parent) => {
+                            finished = Some((handle, parent));
                             break;
                         }
                     }
@@ -413,20 +424,7 @@ where
                     None => rename_in_parents.unwrap().finish(),
                 }
             }
-            transaction::MutablePage::InTransaction(handle) => handle,
-        };
-
-        let (parent, anchor, left, right) = if self.backtrack.is_empty() {
-            (None, None, None, None)
-        } else {
-            let parent = self.backtrack.last().unwrap();
-            let parent = match self.tx.mut_page(*parent)? {
-                transaction::MutablePage::InTransaction(handle) => handle,
-                _ => unreachable!(),
-            };
-
-            let (anchor, left, right) = self.parent_info.pop().unwrap();
-            (Some(parent), anchor, left, right)
+            transaction::MutablePage::InTransaction(handle, parent) => (handle, parent),
         };
 
         Ok(Some(DeleteNextElement {
@@ -448,6 +446,19 @@ where
         key_buffer_size: u32,
     ) -> Result<PageId, std::io::Error> {
         self.tx.add_new_node(mem_page, key_buffer_size)
+    }
+
+    pub fn mut_sibling<'a>(
+        &'a mut self,
+        page_id: PageId,
+    ) -> impl FnMut() -> PageHandle<'a, Mutable<'a>> + 'a {
+        move || {
+            match self.tx.mut_page(page_id, None).unwrap() {
+                // todo: remove this unwrap by changing the SiblingHandle to process errors?
+                transaction::MutablePage::NeedsParentRedirect(redirect) => unimplemented!(),
+                transaction::MutablePage::InTransaction(handle, _) => handle,
+            }
+        }
     }
 
     pub fn new_root(
