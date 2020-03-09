@@ -1,10 +1,15 @@
 pub mod transaction;
-use super::node::SiblingHandle;
 use super::pages::*;
-use super::{transaction::PageRefMut, Metadata, Node, PageId};
+use super::{
+    transaction::{PageRef, PageRefMut},
+    Metadata, Node, PageId,
+};
 use crate::btreeindex::page_manager::PageManager;
-
 use crate::btreeindex::node::NodePageRef;
+use crate::btreeindex::pages::{
+    borrow::{Immutable, Mutable},
+    PageHandle,
+};
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::collections::VecDeque;
@@ -69,7 +74,7 @@ pub struct DeleteBacktrack<'txbuilder, 'txmanager: 'txbuilder, 'storage: 'txmana
 where
     K: Key,
 {
-    tx: &'txbuilder mut transaction::InsertTransaction<'txmanager, 'storage>,
+    tx: &'txbuilder transaction::InsertTransaction<'txmanager, 'storage>,
     backtrack: Vec<PageId>,
     parent_info: Vec<(Option<usize>, Option<PageId>, Option<PageId>)>,
     new_root: Option<PageId>,
@@ -239,7 +244,7 @@ where
 
         let key_buffer_size = usize::try_from(self.key_buffer_size).unwrap();
 
-        match self.tx.mut_page(id, None)? {
+        match self.tx.mut_page(id)? {
             transaction::MutablePage::NeedsParentRedirect(rename_in_parents) => {
                 // this part may be tricky, we need to recursively clone and redirect all the path
                 // from the root to the node we are writing to. We need the backtrack stack, because
@@ -252,13 +257,13 @@ where
 
                     match result {
                         MutablePage::NeedsParentRedirect(rename) => rename_in_parents = rename,
-                        MutablePage::InTransaction(handle, _) => return Ok(Some(handle)),
+                        MutablePage::InTransaction(handle) => return Ok(Some(handle)),
                     }
                 }
-                let (page, _) = rename_in_parents.finish();
+                let page = rename_in_parents.finish();
                 Ok(Some(page))
             }
-            transaction::MutablePage::InTransaction(handle, _) => Ok(Some(handle)),
+            transaction::MutablePage::InTransaction(handle) => Ok(Some(handle)),
         }
     }
 
@@ -300,12 +305,12 @@ where
     }
 }
 
-pub struct DeleteNextElement<'a> {
-    next: PageHandle<'a, Mutable<'a>>,
-    parent: Option<PageHandle<'a, Mutable<'a>>>,
+pub struct DeleteNextElement<'a, 'b: 'a> {
+    next: PageRefMut<'a, 'b>,
+    parent: Option<PageRefMut<'a, 'b>>,
     anchor: Option<usize>,
-    left: Option<PageId>,
-    right: Option<PageId>,
+    left: Option<PageRef<'a, 'b>>,
+    right: Option<PageRef<'a, 'b>>,
 }
 
 impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
@@ -378,7 +383,9 @@ where
         }
     }
 
-    pub fn get_next(&mut self) -> Result<Option<DeleteNextElement>, std::io::Error> {
+    pub fn get_next<'this>(
+        &'this mut self,
+    ) -> Result<Option<DeleteNextElement<'this, 'index>>, std::io::Error> {
         let id = match self.backtrack.pop() {
             Some(id) => id,
             None => return Ok(None),
@@ -400,7 +407,7 @@ where
             (Some(parent), anchor, left, right)
         };
 
-        let (next, parent) = match self.tx.mut_page(id, parent.map(|n| *n))? {
+        let next = match self.tx.mut_page(id)? {
             transaction::MutablePage::NeedsParentRedirect(rename_in_parents) => {
                 // this part may be tricky, we need to recursively clone and redirect all the path
                 // from the root to the node we are writing to. We need the backtrack stack, because
@@ -419,8 +426,8 @@ where
                         MutablePage::NeedsParentRedirect(rename) => {
                             rename_in_parents = Some(rename)
                         }
-                        MutablePage::InTransaction(handle, parent) => {
-                            finished = Some((handle, parent));
+                        MutablePage::InTransaction(handle) => {
+                            finished = Some(handle);
                             break;
                         }
                     }
@@ -430,8 +437,15 @@ where
                     None => rename_in_parents.unwrap().finish(),
                 }
             }
-            transaction::MutablePage::InTransaction(handle, parent) => (handle, parent),
+            transaction::MutablePage::InTransaction(handle) => handle,
         };
+
+        let left = left.and_then(|id| self.tx.get_page(id));
+        let right = right.and_then(|id| self.tx.get_page(id));
+        let parent = parent.map(|id| match self.tx.mut_page(*id).unwrap() {
+            MutablePage::InTransaction(handle) => handle,
+            _ => unreachable!(),
+        });
 
         Ok(Some(DeleteNextElement {
             next,
@@ -454,17 +468,23 @@ where
         self.tx.add_new_node(mem_page, key_buffer_size)
     }
 
+    pub fn delete_node(&mut self, page_id: PageId) {
+        self.tx.delete_node(page_id)
+    }
+
     pub fn mut_sibling<'a>(
         &'a mut self,
         page_id: PageId,
     ) -> impl FnMut() -> PageHandle<'a, Mutable<'a>> + 'a {
-        move || {
-            match self.tx.mut_page(page_id, None).unwrap() {
-                // todo: remove this unwrap by changing the SiblingHandle to process errors?
-                transaction::MutablePage::NeedsParentRedirect(redirect) => unimplemented!(),
-                transaction::MutablePage::InTransaction(handle, _) => handle,
-            }
-        }
+        // move || {
+        //     match self.tx.mut_page(page_id, None).unwrap() {
+        //         // todo: remove this unwrap by changing the SiblingHandle to process errors?
+        //         transaction::MutablePage::NeedsParentRedirect(redirect) => unimplemented!(),
+        //         transaction::MutablePage::InTransaction(handle, _) => handle,
+        //     }
+        // }
+
+        || unimplemented!()
     }
 
     pub fn new_root(
@@ -476,6 +496,13 @@ where
         self.new_root = Some(id);
 
         Ok(())
+    }
+
+    pub fn get_page<'a>(
+        &'a self,
+        page_id: PageId,
+    ) -> Option<super::transaction::PageRef<'a, 'index>> {
+        self.tx.get_page(page_id)
     }
 }
 

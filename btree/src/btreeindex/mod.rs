@@ -395,25 +395,25 @@ where
             .transaction_manager
             .insert_transaction(&self.pages, key_buffer_size);
 
-        let backtrack = tx.delete_backtrack();
+        {
+            let mut backtrack = tx.delete_backtrack();
 
-        backtrack.search_for(key);
+            backtrack.search_for(key);
 
-        // path loaded (cloned) in transaction
+            // path loaded (cloned) in transaction
 
-        // let (leaf, parent, anchor, left, right) = backtrack.get_next()?.unwrap();
-        let DeleteNextElement {
-            next,
-            parent,
-            anchor,
-            left,
-            right,
-        } = backtrack.get_next()?.unwrap();
+            // let (leaf, parent, anchor, left, right) = backtrack.get_next()?.unwrap();
+            let DeleteNextElement {
+                next,
+                parent,
+                anchor,
+                left,
+                right,
+            } = backtrack.get_next()?.unwrap();
 
-        let leaf = next;
-        let leaf_id = leaf.page_id;
+            let mut leaf = next;
+            let leaf_id = leaf.id();
 
-        let rebalance_result = {
             let delete_status = leaf.as_node_mut(key_buffer_size as usize, |mut node| {
                 node.as_leaf_mut().delete(key)
             })?;
@@ -435,45 +435,46 @@ where
             };
 
             let parent = parent.unwrap();
-            let parent_id = parent.page_id;
+            let parent_id = parent.id();
 
             let rebalance_result =
                 leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
-                    let left_sibling = left.and_then(|id| backtrack.mut_sibling(id));
-
-                    let right_sibling = right.and_then(|id| backtrack.mut_sibling(id));
-
-                    let siblings = SiblingsArg::new_from_options(left_sibling, right_sibling);
+                    let siblings = SiblingsArg::new_from_options(left, right);
 
                     node.as_leaf_mut()
-                        .rebalance(RebalanceArgs {
-                            parent,
-                            parent_anchor: anchor,
-                            siblings,
-                        })
+                        .rebalance(siblings)
                         .expect("couldn't rebalance leaf")
                 });
 
-            rebalance_result
-        };
+            match rebalance_result {
+                RebalanceResult::TookKeyFromLeft => {
+                    let siblings = unimplemented!();
+                    leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
+                        node.as_leaf_mut()
+                            .take_key_from_left(parent, anchor, siblings)
+                    });
+                }
+                RebalanceResult::TookKeyFromRight => {
+                    let siblings = unimplemented!();
+                    leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
+                        node.as_leaf_mut()
+                            .take_key_from_right(parent, anchor, siblings)
+                    });
+                }
+                RebalanceResult::MergeIntoLeft => {
+                    backtrack.delete_node(leaf_id);
 
-        match rebalance_result {
-            RebalanceResult::TookKeyFromLeft => {}
-            RebalanceResult::TookKeyFromRight => {}
-            RebalanceResult::MergeIntoLeft => {
-                tx.delete_node(leaf_id);
-
-                self.delete_internal(
-                    anchor.expect("merged into left sibling, but anchor is None"),
-                    &mut backtrack,
-                );
-            }
-            RebalanceResult::MergeIntoSelf => {
-                self.delete_internal(anchor.map_or(0, |a| a + 1), &mut backtrack);
-                tx.delete_node(right.unwrap());
-            }
-        };
-
+                    self.delete_internal(
+                        anchor.expect("merged into left sibling, but anchor is None"),
+                        &mut backtrack,
+                    );
+                }
+                RebalanceResult::MergeIntoSelf => {
+                    self.delete_internal(anchor.map_or(0, |a| a + 1), &mut backtrack);
+                    backtrack.delete_node(right.unwrap());
+                }
+            };
+        }
         tx.commit::<K>();
 
         Ok(())

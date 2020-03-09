@@ -112,6 +112,12 @@ impl<'a, 'b: 'a> NodePageRefMut for PageRefMut<'a, 'b> {
 // -> drop write guard -> take read guard ourselves
 struct ExtendablePages<'storage>(Option<RwLockUpgradableReadGuard<'storage, Pages>>);
 
+pub(super) struct Neighbourhood {
+    parent: PageId,
+    left: Option<PageId>,
+    right: Option<PageId>,
+}
+
 impl<'a> ReadTransaction<'a> {
     pub(super) fn new(version: Arc<Version>, pages: RwLockReadGuard<Pages>) -> ReadTransaction {
         ReadTransaction { version, pages }
@@ -306,6 +312,7 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
         K: Key,
     {
         let state = self.state.borrow();
+        let root = self.root();
         let transaction = super::WriteTransaction {
             new_root: self.root(),
             shadowed_pages: state.shadows.keys().cloned().collect(),
@@ -316,10 +323,7 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
 
         let mut current_version = self.current_version.write();
 
-        *current_version = Arc::new(Version {
-            root: self.root(),
-            transaction,
-        });
+        *current_version = Arc::new(Version { root, transaction });
 
         self.versions.push_back(current_version.clone());
     }
