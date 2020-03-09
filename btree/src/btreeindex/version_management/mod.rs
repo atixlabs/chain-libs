@@ -32,6 +32,7 @@ pub(crate) struct Version {
 pub(crate) struct WriteTransaction {
     new_root: PageId,
     shadowed_pages: Vec<PageId>,
+    deleted_pages: Vec<PageId>,
     next_page_id: PageId,
 }
 
@@ -84,6 +85,7 @@ impl TransactionManager {
                 new_root: metadata.root,
                 shadowed_pages: vec![],
                 next_page_id: metadata.page_manager.next_page(),
+                deleted_pages: vec![],
             },
         })));
 
@@ -144,6 +146,10 @@ impl TransactionManager {
             let version = versions.pop_front().unwrap();
 
             for id in version.transaction.shadowed_pages.iter().cloned() {
+                pages_to_release.push(id)
+            }
+
+            for id in version.transaction.deleted_pages.iter().cloned() {
                 pages_to_release.push(id)
             }
 
