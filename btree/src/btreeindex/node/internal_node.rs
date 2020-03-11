@@ -1,4 +1,4 @@
-use super::{Node, RebalanceArgs, RebalanceResult, SiblingsArg};
+use super::{Node, NodePageRefMut, RebalanceArgs, RebalanceResult, SiblingsArg};
 use crate::btreeindex::{
     pages::{borrow::Mutable, PageHandle},
     Children, ChildrenMut, Keys, KeysMut, PageId,
@@ -344,9 +344,9 @@ where
 
     pub fn take_key_from_left<'siblings>(
         &mut self,
-        mut parent: PageHandle<'siblings, Mutable<'siblings>>,
+        mut parent: impl NodePageRefMut,
         anchor: Option<usize>,
-        mut sibling: PageHandle<'siblings, Mutable<'siblings>>,
+        mut sibling: impl NodePageRefMut,
     ) {
         // steal a key from the left sibling through parent
         let current_len = self.keys().len();
@@ -393,9 +393,9 @@ where
 
     pub fn take_key_from_right<'siblings>(
         &mut self,
-        mut parent: PageHandle<'siblings, Mutable<'siblings>>,
+        mut parent: impl NodePageRefMut,
         anchor: Option<usize>,
-        mut sibling: PageHandle<'siblings, Mutable<'siblings>>,
+        mut sibling: impl NodePageRefMut,
     ) {
         // steal a key from the right sibling though parent
         let current_len = self.keys().len();
@@ -451,9 +451,9 @@ where
 
     pub fn merge_into_left<'siblings>(
         &mut self,
-        mut parent: PageHandle<'siblings, Mutable<'siblings>>,
+        mut parent: impl NodePageRefMut,
         anchor: Option<usize>,
-        mut sibling: PageHandle<'siblings, Mutable<'siblings>>,
+        mut sibling: impl NodePageRefMut,
     ) {
         //merge this into left
         let anchor_key = parent.as_node(self.key_buffer_size, |node: Node<K, &[u8]>| {
@@ -489,9 +489,9 @@ where
 
     pub fn merge_into_self<'siblings>(
         &mut self,
-        parent: PageHandle<'siblings, Mutable<'siblings>>,
+        parent: impl NodePageRefMut,
         anchor: Option<usize>,
-        sibling: PageHandle<'siblings, Mutable<'siblings>>,
+        sibling: impl NodePageRefMut,
     ) {
         //merge right into this
         let anchor_key = parent.as_node(self.key_buffer_size, |node: Node<K, &[u8]>| {

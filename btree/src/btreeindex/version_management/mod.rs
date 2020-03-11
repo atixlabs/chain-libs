@@ -4,8 +4,8 @@ use super::{
     transaction::{PageRef, PageRefMut},
     Metadata, Node, PageId,
 };
-use crate::btreeindex::page_manager::PageManager;
 use crate::btreeindex::node::NodePageRef;
+use crate::btreeindex::page_manager::PageManager;
 use crate::btreeindex::pages::{
     borrow::{Immutable, Mutable},
     PageHandle,
@@ -298,19 +298,62 @@ where
 {
     fn drop(&mut self) {
         if let Some(new_root) = self.new_root {
-            self.tx.current_root = new_root;
+            self.tx.current_root.set(new_root);
         } else {
-            self.tx.current_root = *self.backtrack.first().unwrap();
+            self.tx.current_root.set(*self.backtrack.first().unwrap());
         }
     }
 }
 
-pub struct DeleteNextElement<'a, 'b: 'a> {
-    next: PageRefMut<'a, 'b>,
-    parent: Option<PageRefMut<'a, 'b>>,
-    anchor: Option<usize>,
-    left: Option<PageRef<'a, 'b>>,
-    right: Option<PageRef<'a, 'b>>,
+pub struct DeleteNextElement<'a, 'b: 'a, 'c: 'b, 'd: 'c, K>
+where
+    K: Key,
+{
+    pub next: PageRefMut<'a, 'd>,
+    pub parent: Option<PageRefMut<'a, 'd>>,
+    pub anchor: Option<usize>,
+    pub left: Option<PageRef<'a, 'd>>,
+    pub right: Option<PageRef<'a, 'd>>,
+    backtrack: &'a mut DeleteBacktrack<'b, 'c, 'd, K>,
+}
+
+impl<'a, 'b: 'a, 'c: 'b, 'd: 'c, K> DeleteNextElement<'a, 'b, 'c, 'd, K>
+where
+    K: Key,
+{
+    pub fn mut_left_sibling(&self, key_size: usize) -> PageRefMut<'a, 'd> {
+        let left_id = self.left.as_ref().unwrap().id();
+        match self.backtrack.tx.mut_page(left_id).unwrap() {
+            MutablePage::InTransaction(handle) => handle,
+            MutablePage::NeedsParentRedirect(redirect_pointers) => {
+                redirect_pointers.redirect_parent_in_tx::<K>(key_size, self.parent.clone().unwrap())
+            }
+        }
+    }
+
+    pub fn mut_right_sibling(&self, key_size: usize) -> PageRefMut<'a, 'd> {
+        let right_id = self.right.as_ref().unwrap().id();
+        match self.backtrack.tx.mut_page(right_id).unwrap() {
+            MutablePage::InTransaction(handle) => handle,
+            MutablePage::NeedsParentRedirect(redirect_pointers) => {
+                redirect_pointers.redirect_parent_in_tx::<K>(key_size, self.parent.clone().unwrap())
+            }
+        }
+    }
+
+    pub fn delete_left_sibling(&self) {
+        let id = self.left.as_ref().map(|handle| handle.id()).unwrap();
+        self.backtrack.delete_node(id)
+    }
+
+    pub fn delete_right_sibling(&self) {
+        let id = self.right.as_ref().map(|handle| handle.id()).unwrap();
+        self.backtrack.delete_node(id)
+    }
+
+    pub fn set_root(&self, id: PageId) {
+        self.backtrack.tx.current_root.set(id)
+    }
 }
 
 impl<'txbuilder, 'txmanager: 'txbuilder, 'index: 'txmanager, K>
@@ -385,7 +428,8 @@ where
 
     pub fn get_next<'this>(
         &'this mut self,
-    ) -> Result<Option<DeleteNextElement<'this, 'index>>, std::io::Error> {
+    ) -> Result<Option<DeleteNextElement<'this, 'txbuilder, 'txmanager, 'index, K>>, std::io::Error>
+    {
         let id = match self.backtrack.pop() {
             Some(id) => id,
             None => return Ok(None),
@@ -453,6 +497,7 @@ where
             anchor,
             left,
             right,
+            backtrack: self,
         }))
     }
 
@@ -468,14 +513,11 @@ where
         self.tx.add_new_node(mem_page, key_buffer_size)
     }
 
-    pub fn delete_node(&mut self, page_id: PageId) {
+    pub fn delete_node(&self, page_id: PageId) {
         self.tx.delete_node(page_id)
     }
 
-    pub fn mut_sibling<'a>(
-        &'a mut self,
-        page_id: PageId,
-    ) -> impl FnMut() -> PageHandle<'a, Mutable<'a>> + 'a {
+    pub fn mut_sibling<'a>(&'a self, page_id: PageId) -> PageRefMut {
         // move || {
         //     match self.tx.mut_page(page_id, None).unwrap() {
         //         // todo: remove this unwrap by changing the SiblingHandle to process errors?
@@ -484,7 +526,7 @@ where
         //     }
         // }
 
-        || unimplemented!()
+        unimplemented!()
     }
 
     pub fn new_root(
@@ -513,9 +555,9 @@ where
 {
     fn drop(&mut self) {
         if let Some(new_root) = self.new_root {
-            self.tx.current_root = new_root;
+            self.tx.current_root.set(new_root);
         } else {
-            self.tx.current_root = *self.backtrack.first().unwrap();
+            self.tx.current_root.set(*self.backtrack.first().unwrap());
         }
     }
 }
