@@ -289,7 +289,7 @@ where
 
     #[allow(dead_code)]
     pub fn rebalance<N: super::NodePageRef>(
-        &'b mut self,
+        &'b self,
         args: SiblingsArg<N>,
     ) -> Result<RebalanceResult, BTreeStoreError> {
         let current_len = self.keys().len();
@@ -315,7 +315,7 @@ where
                     })
                     .is_some()
                 {
-                    RebalanceResult::TookKeyFromLeft
+                    RebalanceResult::TakeFromLeft
                 } else if right_sibling_handle
                     .clone()
                     .filter(|handle| {
@@ -325,7 +325,7 @@ where
                     })
                     .is_some()
                 {
-                    RebalanceResult::TookKeyFromRight
+                    RebalanceResult::TakeFromRight
                 } else if left_sibling_handle.is_some() {
                     RebalanceResult::MergeIntoLeft
                 } else if right_sibling_handle.is_some() {
@@ -619,11 +619,15 @@ mod tests {
         T: AsRef<[u8]>,
     {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let keys: Vec<K> = self
+                .keys()
+                .into_iter()
+                .map(|k| k.borrow().clone())
+                .collect();
             write!(
                 f,
-                "Internal Node {{ max_keys: {}, keys: {} }}",
-                self.max_keys,
-                self.keys().len()
+                "Internal Node {{ max_keys: {}, keys: {:?} }}",
+                self.max_keys, keys
             )
         }
     }
@@ -702,18 +706,11 @@ mod tests {
                 _ => panic!(),
             }
 
-            match node
-                .rebalance(RebalanceArgs {
-                    parent,
-                    parent_anchor: Some(0),
-                    siblings: SiblingsArg::Left((left_sibling, || {
-                        before_pages.make_shadow(21, 31).unwrap();
-                        before_pages.mut_page(31).unwrap()
-                    })),
-                })
-                .unwrap()
-            {
-                RebalanceResult::TookKeyFromLeft => (),
+            match node.rebalance(SiblingsArg::Left(left_sibling)).unwrap() {
+                RebalanceResult::TakeFromLeft => {
+                    before_pages.make_shadow(21, 31).unwrap();
+                    node.take_key_from_left(parent, Some(0), before_pages.mut_page(31).unwrap());
+                }
                 _ => panic!(),
             }
         });
@@ -778,18 +775,11 @@ mod tests {
                 _ => panic!(),
             };
 
-            match node
-                .rebalance(RebalanceArgs {
-                    parent,
-                    parent_anchor: Some(0),
-                    siblings: SiblingsArg::Right((right_sibling, || {
-                        before_pages.make_shadow(13, 31).unwrap();
-                        before_pages.mut_page(31).unwrap()
-                    })),
-                })
-                .unwrap()
-            {
-                RebalanceResult::TookKeyFromRight => (),
+            match node.rebalance(SiblingsArg::Right(right_sibling)).unwrap() {
+                RebalanceResult::TakeFromRight => {
+                    before_pages.make_shadow(13, 31).unwrap();
+                    node.take_key_from_right(parent, Some(0), before_pages.mut_page(31).unwrap());
+                }
                 _ => panic!(),
             }
         });
@@ -869,18 +859,11 @@ mod tests {
                 _ => panic!(),
             };
 
-            match node
-                .rebalance(RebalanceArgs {
-                    parent,
-                    parent_anchor: Some(0),
-                    siblings: SiblingsArg::Left((left_sibling, || {
-                        before_pages.make_shadow(11, 31).unwrap();
-                        before_pages.mut_page(31).unwrap()
-                    })),
-                })
-                .unwrap()
-            {
-                RebalanceResult::MergeIntoLeft => (),
+            match node.rebalance(SiblingsArg::Left(left_sibling)).unwrap() {
+                RebalanceResult::MergeIntoLeft => {
+                    before_pages.make_shadow(11, 31).unwrap();
+                    node.merge_into_left(parent, Some(0), before_pages.mut_page(31).unwrap());
+                }
                 _ => panic!(),
             }
         });
@@ -959,18 +942,11 @@ mod tests {
                 _ => panic!(),
             };
 
-            match node
-                .rebalance(RebalanceArgs {
-                    parent,
-                    parent_anchor: Some(0),
-                    siblings: SiblingsArg::Right((right_sibling, || {
-                        before_pages.make_shadow(13, 33).unwrap();
-                        before_pages.mut_page(33).unwrap()
-                    })),
-                })
-                .unwrap()
-            {
-                RebalanceResult::MergeIntoSelf => (),
+            match node.rebalance(SiblingsArg::Right(right_sibling)).unwrap() {
+                RebalanceResult::MergeIntoSelf => {
+                    before_pages.make_shadow(13, 33).unwrap();
+                    node.merge_into_self(parent, Some(0), before_pages.mut_page(33).unwrap());
+                }
                 _ => panic!(),
             };
         });

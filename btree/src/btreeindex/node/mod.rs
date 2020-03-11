@@ -40,8 +40,8 @@ pub(crate) enum NodeTag {
 use super::pages::borrow::{Immutable, Mutable};
 use super::pages::PageHandle;
 pub enum RebalanceResult {
-    TookKeyFromLeft,
-    TookKeyFromRight,
+    TakeFromLeft,
+    TakeFromRight,
     MergeIntoLeft,
     MergeIntoSelf,
 }
@@ -214,6 +214,37 @@ mod tests {
     use crate::tests::U64Key;
     use std::mem::size_of;
     use tempfile::tempfile;
+
+    impl<'a> NodePageRef for PageHandle<'a, Immutable<'a>> {
+        fn as_node<K, R>(&self, key_buffer_size: usize, f: impl FnOnce(Node<K, &[u8]>) -> R) -> R
+        where
+            K: Key,
+        {
+            self.as_node(key_buffer_size, f)
+        }
+    }
+
+    impl<'a> NodePageRef for PageHandle<'a, Mutable<'a>> {
+        fn as_node<K, R>(&self, key_buffer_size: usize, f: impl FnOnce(Node<K, &[u8]>) -> R) -> R
+        where
+            K: Key,
+        {
+            self.as_node(key_buffer_size, f)
+        }
+    }
+
+    impl<'a> NodePageRefMut for PageHandle<'a, Mutable<'a>> {
+        fn as_node_mut<K, R>(
+            &mut self,
+            key_buffer_size: usize,
+            f: impl FnOnce(Node<K, &mut [u8]>) -> R,
+        ) -> R
+        where
+            K: Key,
+        {
+            self.as_node_mut(key_buffer_size, f)
+        }
+    }
 
     pub fn pages() -> Pages {
         let page_size = 8 + 8 + 3 * size_of::<U64Key>() + 5 * size_of::<PageId>() + 4 + 8;
