@@ -6,10 +6,7 @@ use super::{
 };
 use crate::btreeindex::node::NodePageRef;
 use crate::btreeindex::page_manager::PageManager;
-use crate::btreeindex::pages::{
-    borrow::{Immutable, Mutable},
-    PageHandle,
-};
+
 use crate::mem_page::MemPage;
 use crate::Key;
 use std::collections::VecDeque;
@@ -323,7 +320,7 @@ where
 {
     pub fn mut_left_sibling(&self, key_size: usize) -> PageRefMut<'a, 'd> {
         let left_id = self.left.as_ref().unwrap().id();
-        match self.backtrack.tx.mut_page(left_id).unwrap() {
+        match self.backtrack.tx.mut_page(dbg!(left_id)).unwrap() {
             MutablePage::InTransaction(handle) => handle,
             MutablePage::NeedsParentRedirect(redirect_pointers) => {
                 redirect_pointers.redirect_parent_in_tx::<K>(key_size, self.parent.clone().unwrap())
@@ -333,7 +330,7 @@ where
 
     pub fn mut_right_sibling(&self, key_size: usize) -> PageRefMut<'a, 'd> {
         let right_id = self.right.as_ref().unwrap().id();
-        match self.backtrack.tx.mut_page(right_id).unwrap() {
+        match self.backtrack.tx.mut_page(dbg!(right_id)).unwrap() {
             MutablePage::InTransaction(handle) => handle,
             MutablePage::NeedsParentRedirect(redirect_pointers) => {
                 redirect_pointers.redirect_parent_in_tx::<K>(key_size, self.parent.clone().unwrap())
@@ -348,7 +345,7 @@ where
 
     pub fn delete_right_sibling(&self) {
         let id = self.right.as_ref().map(|handle| handle.id()).unwrap();
-        self.backtrack.delete_node(id)
+        self.backtrack.delete_node(dbg!(id))
     }
 
     pub fn set_root(&self, id: PageId) {
@@ -413,7 +410,7 @@ where
                 },
             );
 
-            self.backtrack.push(page.id());
+            self.backtrack.push(dbg!(page.id()));
 
             match found_leaf {
                 Step::Internal(anchor, left, right) => self.parent_info.push((anchor, left, right)),
@@ -430,7 +427,7 @@ where
         &'this mut self,
     ) -> Result<Option<DeleteNextElement<'this, 'txbuilder, 'txmanager, 'index, K>>, std::io::Error>
     {
-        let id = match self.backtrack.pop() {
+        let id = match dbg!(&mut self.backtrack).pop() {
             Some(id) => id,
             None => return Ok(None),
         };
@@ -517,7 +514,7 @@ where
         self.tx.delete_node(page_id)
     }
 
-    pub fn mut_sibling<'a>(&'a self, page_id: PageId) -> PageRefMut {
+    pub fn mut_sibling<'a>(&'a self, _page_id: PageId) -> PageRefMut {
         // move || {
         //     match self.tx.mut_page(page_id, None).unwrap() {
         //         // todo: remove this unwrap by changing the SiblingHandle to process errors?

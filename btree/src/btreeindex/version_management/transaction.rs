@@ -315,7 +315,7 @@ impl<'locks, 'storage: 'locks> InsertTransaction<'locks, 'storage> {
         K: Key,
     {
         // let state = self.state.borrow();
-        let new_root = self.root();
+        let new_root = dbg!(self.root());
         let state = self.state.into_inner();
         let transaction = super::WriteTransaction {
             new_root,
