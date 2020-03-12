@@ -498,50 +498,8 @@ where
         }))
     }
 
-    pub fn has_next(&self) -> bool {
-        self.backtrack.last().is_some()
-    }
-
-    pub fn add_new_node(
-        &mut self,
-        mem_page: MemPage,
-        key_buffer_size: u32,
-    ) -> Result<PageId, std::io::Error> {
-        self.tx.add_new_node(mem_page, key_buffer_size)
-    }
-
     pub fn delete_node(&self, page_id: PageId) {
         self.tx.delete_node(page_id)
-    }
-
-    pub fn mut_sibling<'a>(&'a self, _page_id: PageId) -> PageRefMut {
-        // move || {
-        //     match self.tx.mut_page(page_id, None).unwrap() {
-        //         // todo: remove this unwrap by changing the SiblingHandle to process errors?
-        //         transaction::MutablePage::NeedsParentRedirect(redirect) => unimplemented!(),
-        //         transaction::MutablePage::InTransaction(handle, _) => handle,
-        //     }
-        // }
-
-        unimplemented!()
-    }
-
-    pub fn new_root(
-        &mut self,
-        mem_page: MemPage,
-        key_buffer_size: u32,
-    ) -> Result<(), std::io::Error> {
-        let id = self.tx.add_new_node(mem_page, key_buffer_size)?;
-        self.new_root = Some(id);
-
-        Ok(())
-    }
-
-    pub fn get_page<'a>(
-        &'a self,
-        page_id: PageId,
-    ) -> Option<super::transaction::PageRef<'a, 'index>> {
-        self.tx.get_page(page_id)
     }
 }
 

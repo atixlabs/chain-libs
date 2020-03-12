@@ -114,12 +114,6 @@ impl<'a, 'b: 'a> NodePageRefMut for PageRefMut<'a, 'b> {
 // -> drop write guard -> take read guard ourselves
 struct ExtendablePages<'storage>(Option<RwLockUpgradableReadGuard<'storage, Pages>>);
 
-pub(super) struct Neighbourhood {
-    parent: PageId,
-    left: Option<PageId>,
-    right: Option<PageId>,
-}
-
 impl<'a> ReadTransaction<'a> {
     pub(super) fn new(version: Arc<Version>, pages: RwLockReadGuard<Pages>) -> ReadTransaction {
         ReadTransaction { version, pages }

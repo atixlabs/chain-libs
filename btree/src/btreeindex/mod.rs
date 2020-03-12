@@ -13,8 +13,8 @@ use metadata::{Metadata, StaticSettings};
 use node::internal_node::InternalDeleteStatus;
 use node::leaf_node::LeafDeleteStatus;
 use node::{
-    InternalInsertStatus, LeafInsertStatus, Node, NodePageRef, NodePageRefMut,
-    RebalanceResult, SiblingsArg,
+    InternalInsertStatus, LeafInsertStatus, Node, NodePageRef, NodePageRefMut, RebalanceResult,
+    SiblingsArg,
 };
 use pages::{borrow, PageHandle, Pages, PagesInitializationParams};
 use std::borrow::Borrow;
@@ -420,14 +420,13 @@ where
             let next_element = backtrack.get_next()?.unwrap();
 
             let mut leaf = next_element.next.clone();
-            let leaf_id = leaf.id();
 
             let delete_status = leaf.as_node_mut(key_buffer_size as usize, |mut node| {
                 node.as_leaf_mut().delete(key)
             })?;
 
             match delete_status {
-                LeafDeleteStatus::Ok => return Ok(dbg!(())),
+                LeafDeleteStatus::Ok => return Ok(()),
                 LeafDeleteStatus::NeedsRebalance => (),
             };
 
@@ -462,7 +461,6 @@ where
 
             match rebalance_result {
                 RebalanceResult::TakeFromLeft => {
-                    dbg!("(leaf) take from left");
                     let sibling = next_element.mut_left_sibling(key_buffer_size as usize);
                     leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
                         node.as_leaf_mut()
@@ -470,7 +468,6 @@ where
                     });
                 }
                 RebalanceResult::TakeFromRight => {
-                    dbg!("(leaf) take from right");
                     let sibling = next_element.mut_right_sibling(key_buffer_size as usize);
                     leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
                         node.as_leaf_mut()
@@ -478,7 +475,6 @@ where
                     });
                 }
                 RebalanceResult::MergeIntoLeft => {
-                    dbg!("(leaf) merge into left {}", leaf_id);
                     let sibling = next_element.mut_left_sibling(key_buffer_size as usize);
 
                     leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
@@ -493,10 +489,9 @@ where
                             .clone()
                             .expect("merged into left sibling, but anchor is None"),
                         &mut backtrack,
-                    );
+                    )?;
                 }
                 RebalanceResult::MergeIntoSelf => {
-                    dbg!("(leaf) merge into self");
                     let sibling = next_element.right.clone().unwrap();
 
                     leaf.as_node_mut(key_buffer_size as usize, |mut node: Node<K, &mut [u8]>| {
@@ -507,7 +502,7 @@ where
                     self.delete_internal(
                         next_element.anchor.clone().map_or(0, |a| a + 1),
                         &mut backtrack,
-                    );
+                    )?;
                 }
             };
         }
@@ -557,7 +552,7 @@ where
                     });
                 // FIXME: why do I have to search for the id here?
                 // NeedsRebalance::DeleteRoot { new_root }
-                next_element.set_root(dbg!(new_root));
+                next_element.set_root(new_root);
             } else {
                 // the root is not rebalanced
                 return Ok(());
@@ -581,7 +576,6 @@ where
 
             match rebalance_result {
                 RebalanceResult::TakeFromLeft => {
-                    dbg!("(internal) take from left");
                     let sibling = next_element.mut_left_sibling(key_buffer_size as usize);
                     next_element.next.as_node_mut(
                         key_buffer_size as usize,
@@ -592,7 +586,6 @@ where
                     );
                 }
                 RebalanceResult::TakeFromRight => {
-                    dbg!("(internal) take from right");
                     let sibling = next_element.mut_right_sibling(key_buffer_size as usize);
                     next_element.next.as_node_mut(
                         key_buffer_size as usize,
@@ -603,7 +596,6 @@ where
                     );
                 }
                 RebalanceResult::MergeIntoLeft => {
-                    dbg!("(internal) merge into left {}", next_element.next.id());
                     let sibling = next_element.mut_left_sibling(key_buffer_size as usize);
 
                     next_element.next.as_node_mut(
@@ -625,7 +617,6 @@ where
                     )?;
                 }
                 RebalanceResult::MergeIntoSelf => {
-                    dbg!("(internal) merge into self {}", next_element.next.id());
                     // TODO: probably right sibling doesn't need to be mutated (before it will be deleted anyway)
                     let sibling = next_element.right.clone().unwrap();
 
@@ -645,31 +636,11 @@ where
 
                     let new_anchor = next_element.anchor.clone().map_or(0, |n| n + 1);
                     tx.delete_node(right_id);
-                    self.delete_internal(new_anchor, tx);
+                    self.delete_internal(new_anchor, tx)?;
                 }
             };
-
-            // NeedsRebalance::ShouldRecurse {
-            //     rebalance_result,
-            //     right_id: right,
-            //     parent_id,
-            //     parent_anchor,
-            //     self_id: node.page_id,
-            // }
         }
 
-        // match after_delete {
-        //     NeedsRebalance::ShouldRecurse {
-        //         rebalance_result,
-        //         right_id,
-        //         parent_id,
-        //         parent_anchor,
-        //         self_id,
-        //     } => match rebalance_result {
-        //     NeedsRebalance::DeleteRoot { new_root } => {
-        //         tx.replace_root(new_root);
-        //     }
-        // }
         Ok(())
     }
 }
