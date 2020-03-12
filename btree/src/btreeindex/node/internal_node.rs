@@ -1,7 +1,5 @@
 use super::{Node, NodePageRef, NodePageRefMut, RebalanceResult, SiblingsArg};
-use crate::btreeindex::{
-    Children, ChildrenMut, Keys, KeysMut, PageId,
-};
+use crate::btreeindex::{Children, ChildrenMut, Keys, KeysMut, PageId};
 use crate::{BTreeStoreError, Key, MemPage};
 use byteorder::{ByteOrder as _, LittleEndian};
 use std::borrow::Borrow;

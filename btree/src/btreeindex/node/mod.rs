@@ -37,8 +37,6 @@ pub(crate) enum NodeTag {
     Leaf = 1,
 }
 
-use super::pages::borrow::{Mutable};
-use super::pages::PageHandle;
 pub enum RebalanceResult {
     TakeFromLeft,
     TakeFromRight,
@@ -46,24 +44,11 @@ pub enum RebalanceResult {
     MergeIntoSelf,
 }
 
-pub struct RebalanceArgs<'a, N: NodePageRef + 'a> {
-    pub parent: PageHandle<'a, Mutable<'a>>,
-    pub parent_anchor: Option<usize>,
-    pub siblings: SiblingsArg<N>,
-}
-
 pub enum SiblingsArg<N: NodePageRef> {
     Left(N),
     Right(N),
     Both(N, N),
 }
-
-// pub type SiblingHandle<'a, F> = (PageHandle<'a, Immutable<'a>>, F);
-// pub enum SiblingsArg<'a, F: FnMut() -> PageHandle<'a, Mutable<'a>>> {
-//     Left(SiblingHandle<'a, F>),
-//     Right(SiblingHandle<'a, F>),
-//     Both(SiblingHandle<'a, F>, SiblingHandle<'a, F>),
-// }
 
 impl<N: NodePageRef> SiblingsArg<N> {
     pub fn new_from_options(left_sibling: Option<N>, right_sibling: Option<N>) -> Self {

@@ -1,9 +1,7 @@
 use std::marker::PhantomData;
 
 use super::{Node, NodePageRef, NodePageRefMut, RebalanceResult, SiblingsArg};
-use crate::btreeindex::{
-    Keys, KeysMut, PageId, Values, ValuesMut,
-};
+use crate::btreeindex::{Keys, KeysMut, PageId, Values, ValuesMut};
 use crate::BTreeStoreError;
 use crate::Key;
 use crate::MemPage;
