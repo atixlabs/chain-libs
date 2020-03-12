@@ -37,7 +37,7 @@ pub(crate) enum NodeTag {
     Leaf = 1,
 }
 
-use super::pages::borrow::{Immutable, Mutable};
+use super::pages::borrow::{Mutable};
 use super::pages::PageHandle;
 pub enum RebalanceResult {
     TakeFromLeft,

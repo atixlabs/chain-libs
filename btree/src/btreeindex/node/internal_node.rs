@@ -1,6 +1,5 @@
-use super::{Node, NodePageRefMut, RebalanceArgs, RebalanceResult, SiblingsArg};
+use super::{Node, NodePageRef, NodePageRefMut, RebalanceResult, SiblingsArg};
 use crate::btreeindex::{
-    pages::{borrow::Mutable, PageHandle},
     Children, ChildrenMut, Keys, KeysMut, PageId,
 };
 use crate::{BTreeStoreError, Key, MemPage};
@@ -292,7 +291,7 @@ where
         &'b self,
         args: SiblingsArg<N>,
     ) -> Result<RebalanceResult, BTreeStoreError> {
-        let current_len = self.keys().len();
+        let _current_len = self.keys().len();
 
         let result = {
             let left_sibling_handle = match &args {
@@ -451,7 +450,7 @@ where
 
     pub fn merge_into_left<'siblings>(
         &mut self,
-        mut parent: impl NodePageRefMut,
+        parent: impl NodePageRefMut,
         anchor: Option<usize>,
         mut sibling: impl NodePageRefMut,
     ) {
@@ -491,13 +490,13 @@ where
         &mut self,
         parent: impl NodePageRefMut,
         anchor: Option<usize>,
-        sibling: impl NodePageRefMut,
+        sibling: impl NodePageRef,
     ) {
         //merge right into this
         let anchor_key = parent.as_node(self.key_buffer_size, |node: Node<K, &[u8]>| {
             node.as_internal()
                 .keys()
-                .get(anchor.map(|a| a + 1).unwrap_or(0))
+                .get(anchor.map_or(0, |a| a + 1))
                 .borrow()
                 .clone()
         });

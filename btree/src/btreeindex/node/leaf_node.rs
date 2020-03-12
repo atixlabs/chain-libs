@@ -1,8 +1,7 @@
 use std::marker::PhantomData;
 
-use super::{Node, NodePageRefMut, RebalanceArgs, RebalanceResult, SiblingsArg};
+use super::{Node, NodePageRef, NodePageRefMut, RebalanceResult, SiblingsArg};
 use crate::btreeindex::{
-    pages::{borrow::Mutable, PageHandle},
     Keys, KeysMut, PageId, Values, ValuesMut,
 };
 use crate::BTreeStoreError;
@@ -228,7 +227,7 @@ where
 
     pub fn rebalance<N: super::NodePageRef>(
         &'b self,
-        mut args: SiblingsArg<N>,
+        args: SiblingsArg<N>,
     ) -> Result<RebalanceResult, BTreeStoreError> {
         let current_len = self.keys().len();
 
@@ -378,8 +377,8 @@ where
 
     pub fn merge_into_left<'siblings>(
         &mut self,
-        parent: impl NodePageRefMut,
-        anchor: Option<usize>,
+        _parent: impl NodePageRefMut,
+        _anchor: Option<usize>,
         mut sibling: impl NodePageRefMut,
     ) {
         //merge this into left
@@ -403,9 +402,9 @@ where
 
     pub fn merge_into_self<'siblings>(
         &mut self,
-        parent: impl NodePageRefMut,
-        anchor: Option<usize>,
-        sibling: impl NodePageRefMut,
+        _parent: impl NodePageRefMut,
+        _anchor: Option<usize>,
+        sibling: impl NodePageRef,
     ) {
         //merge right into this
 
@@ -434,7 +433,7 @@ where
     ) -> Result<LeafDeleteStatus, BTreeStoreError> {
         match self.keys().binary_search(key) {
             Ok(pos) => {
-                self.delete_key_value(pos)
+                self.delete_key_value(dbg!(pos))
                     .expect("internal error: keys search returned invalid position");
                 let current_len = self.keys().len();
                 if current_len < self.lower_bound() {
@@ -598,7 +597,7 @@ mod tests {
         assert_eq!(keys.len(), values.len());
 
         const NUMBER_OF_KEYS: usize = 3;
-        let page_size = crate::btreeindex::node::TAG_SIZE
+        let _page_size = crate::btreeindex::node::TAG_SIZE
             + LEN_SIZE
             + NUMBER_OF_KEYS * size_of::<U64Key>()
             + NUMBER_OF_KEYS * size_of::<V>();
