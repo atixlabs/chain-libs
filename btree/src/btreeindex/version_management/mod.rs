@@ -1,16 +1,10 @@
 pub mod transaction;
 use super::pages::*;
-use super::{
-    transaction::{PageRef, PageRefMut},
-    Metadata, Node, PageId,
-};
+use super::{Metadata, PageId};
 
 use crate::btreeindex::page_manager::PageManager;
 
-
-
 use std::collections::VecDeque;
-
 
 use transaction::{ReadTransaction, WriteTransaction};
 
